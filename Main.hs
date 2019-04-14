@@ -48,7 +48,8 @@ parseCommand = Opts.subparser (
     Opts.command "add"  parseCmdAdd <>
     Opts.command "show"  parseCmdShow <>
     Opts.command "update"  parseCmdUpdate <>
-    Opts.command "drop"  parseCmdDrop )
+    Opts.command "drop"  parseCmdDrop <>
+    Opts.command "info"  parseCmdInfo )
 
 newtype Sources = Sources
   { unSources :: HMap.HashMap PackageName PackageSpec }
@@ -512,6 +513,54 @@ cmdDrop packageName = \case
 
       setSources $ Sources $
         HMap.insert packageName packageSpec sources
+
+-------------------------------------------------------------------------------
+-- Info
+-------------------------------------------------------------------------------
+parseCmdInfo :: Opts.ParserInfo (IO ())
+parseCmdInfo =
+    Opts.info
+      ((cmdInfo <$> parsePackageName <*> parseInfoAttributes) <**>
+        Opts.helper) $
+      mconcat desc
+  where
+    desc =
+      [ Opts.fullDesc
+      , Opts.progDesc "Info dependency"
+      , Opts.headerDoc $ Just $
+          "Examples:" Opts.<$$>
+          "" Opts.<$$>
+          "  niv info" Opts.<$$>
+          "  niv info"
+      ]
+    parseInfoAttributes :: Opts.Parser [T.Text]
+    parseInfoAttributes = many $
+      Opts.argument Opts.str (Opts.metavar "ATTRIBUTE")
+
+cmdInfo :: PackageName -> [T.Text] -> IO ()
+cmdInfo packageName = \case
+    [] -> do
+      putStrLn $ "Infoping package: " <> unPackageName packageName
+      sources <- unSources <$> getSources
+
+      setSources $ Sources $
+        HMap.delete packageName sources
+    attrs -> do
+      putStrLn $ "Infoping attributes :" <>
+        (T.unpack (T.intercalate " " attrs))
+      putStrLn $ "In package: " <> unPackageName packageName
+      sources <- unSources <$> getSources
+
+      packageSpec <- case HMap.lookup packageName sources of
+        Nothing ->
+          abortCannotDropNoSuchPackage packageName
+        Just (PackageSpec packageSpec) -> pure $ PackageSpec $
+          HMap.mapMaybeWithKey
+            (\k v -> if k `elem` attrs then Nothing else Just v) packageSpec
+
+      setSources $ Sources $
+        HMap.insert packageName packageSpec sources
+
 
 -------------------------------------------------------------------------------
 -- Aux
