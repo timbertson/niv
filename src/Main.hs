@@ -58,7 +58,7 @@ newtype Sources = Sources
 getSources :: IO Sources
 getSources = do
     -- TODO: if doesn't exist: run niv init
-    putStrLn $ "Reading sources file"
+    putStrLn $ "Reading sources: file"
     decodeFileStrict pathNixSourcesJson >>= \case
       Just (Aeson.Object obj) ->
         fmap (Sources . mconcat) $
@@ -69,6 +69,23 @@ getSources = do
               _ -> abortAttributeIsntAMap
       Just _ -> abortSourcesIsntAMap
       Nothing -> abortSourcesIsntJSON
+
+getSourcesFrom :: SourceFile -> IO Sources
+getSourcesFrom source = do
+    -- TODO: if doesn't exist: run niv init
+    putStrLn $ "Reading sources: " ++ sourcePath
+    decodeFileStrict sourcePath >>= \case
+      Just (Aeson.Object obj) ->
+        fmap (Sources . mconcat) $
+          forM (HMap.toList obj) $ \(k, v) ->
+            case v of
+              Aeson.Object v' ->
+                pure $ HMap.singleton (PackageName (T.unpack k)) (PackageSpec v')
+              _ -> abortAttributeIsntAMap
+      Just _ -> abortSourcesIsntAMap
+      Nothing -> abortSourcesIsntJSON
+    where
+      sourcePath = pathOfSource source
 
 -- TODO: pretty
 setSources :: Sources -> IO ()
@@ -520,7 +537,7 @@ cmdDrop packageName = \case
 parseCmdInfo :: Opts.ParserInfo (IO ())
 parseCmdInfo =
     Opts.info
-      ((cmdInfo <$> parsePackageName <*> parseInfoAttributes) <**>
+      ((cmdInfo <$> parseInfoAttributes) <**>
         Opts.helper) $
       mconcat desc
   where
@@ -537,29 +554,29 @@ parseCmdInfo =
     parseInfoAttributes = many $
       Opts.argument Opts.str (Opts.metavar "ATTRIBUTE")
 
-cmdInfo :: PackageName -> [T.Text] -> IO ()
-cmdInfo packageName = \case
+cmdInfo :: [T.Text] -> IO ()
+cmdInfo = \case
     [] -> do
-      putStrLn $ "Infoping package: " <> unPackageName packageName
-      sources <- unSources <$> getSources
+      putStrLn $ "Infoping package: " <> "TODO"
+      sources <- unSources <$> getSourcesFrom DefaultSource
 
       setSources $ Sources $
-        HMap.delete packageName sources
+        HMap.delete (PackageName "TODO") sources
     attrs -> do
       putStrLn $ "Infoping attributes :" <>
         (T.unpack (T.intercalate " " attrs))
-      putStrLn $ "In package: " <> unPackageName packageName
+      putStrLn $ "In package: " <> "TODO"
       sources <- unSources <$> getSources
 
-      packageSpec <- case HMap.lookup packageName sources of
+      packageSpec <- case HMap.lookup (PackageName "TODO") sources of
         Nothing ->
-          abortCannotDropNoSuchPackage packageName
+          abortCannotDropNoSuchPackage (PackageName "TODO")
         Just (PackageSpec packageSpec) -> pure $ PackageSpec $
           HMap.mapMaybeWithKey
             (\k v -> if k `elem` attrs then Nothing else Just v) packageSpec
 
       setSources $ Sources $
-        HMap.insert packageName packageSpec sources
+        HMap.insert (PackageName "TODO") packageSpec sources
 
 
 -------------------------------------------------------------------------------
@@ -750,6 +767,17 @@ pkgs.mkShell
 -- | @nix/sources.json"
 pathNixSourcesJson :: FilePath
 pathNixSourcesJson = "nix" </> "sources.json"
+
+data SourceFile
+  = DefaultSource
+  | LocalSource
+  | NamedSource String
+
+pathOfSource :: SourceFile -> FilePath
+pathOfSource source = case s of
+  DefaultSource -> "nix" </> "wrangle.json"
+  LocalSource -> "nix" </> "wrangle-local.json"
+  NamedSource path -> path
 
 -- | Empty JSON map
 initNixSourcesJsonContent :: String
