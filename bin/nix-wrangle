@@ -1,1 +1,6 @@
-../dist-newstyle/build/x86_64-linux/ghc-8.6.3/nix-wrangle-0.0.0/x/nix-wrangle/build/nix-wrangle/nix-wrangle
+#!/usr/bin/env bash
+set -eu
+here="$(dirname "$0")"
+exe="$(find "$here/../dist-newstyle" -type f -name nix-wrangle)"
+[ -n "$exe" ]
+exec "$exe" "$@"

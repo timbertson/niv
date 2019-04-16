@@ -774,7 +774,7 @@ data SourceFile
   | NamedSource String
 
 pathOfSource :: SourceFile -> FilePath
-pathOfSource source = case s of
+pathOfSource source = case source of
   DefaultSource -> "nix" </> "wrangle.json"
   LocalSource -> "nix" </> "wrangle-local.json"
   NamedSource path -> path

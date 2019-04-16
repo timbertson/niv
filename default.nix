@@ -18,6 +18,8 @@ mkDerivation rec {
   buildInputs = [ haskellPackages.cabal-install pkgs.zlib ];
   shellHook = ''
     export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath buildInputs}:$LD_LIBRARY_PATH
+    # needed on OSX, where `cc` is a wrapper and can't otherwise find its own libc++.so
+    export LIBRARY_PATH=${pkgs.libcxx}/lib:$LIBRARY_PATH
     export LANG=en_US.UTF-8
   '';
 })
