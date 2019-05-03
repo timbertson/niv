@@ -55,6 +55,22 @@ newtype Sources = Sources
   { unSources :: HMap.HashMap PackageName PackageSpec }
   deriving newtype (FromJSON, ToJSON)
 
+newtype CommonOpts = CommonOpts {
+  sources :: [SourceFile]
+} deriving newtype Show
+
+parseCommon :: Opts.Parser CommonOpts
+parseCommon =
+  setSources <$> parseSourceOptions
+  where
+    setSources s = CommonOpts { sources = s }
+    parseSourceOptions = many $ NamedSource <$> Opts.strOption
+      ( Opts.long "source" <>
+        Opts.short 's' <>
+        Opts.metavar "SOURCE.json" <>
+        Opts.help "Specify wrangle.json file to operate on"
+      )
+
 getSources :: IO Sources
 getSources = do
     -- TODO: if doesn't exist: run niv init
@@ -70,8 +86,8 @@ getSources = do
       Just _ -> abortSourcesIsntAMap
       Nothing -> abortSourcesIsntJSON
 
-getSourcesFrom :: SourceFile -> IO Sources
-getSourcesFrom source = do
+loadSourceFile :: SourceFile -> IO Sources
+loadSourceFile source = do
     -- TODO: if doesn't exist: run niv init
     putStrLn $ "Reading sources: " ++ sourcePath
     decodeFileStrict sourcePath >>= \case
@@ -86,6 +102,21 @@ getSourcesFrom source = do
       Nothing -> abortSourcesIsntJSON
     where
       sourcePath = pathOfSource source
+
+loadSources :: [SourceFile] -> IO Sources
+loadSources sources =
+  loadSourceFile (head sources)
+
+defaultSourceFileCandidates :: [SourceFile]
+defaultSourceFileCandidates = [ DefaultSource, LocalSource ]
+
+detectDefaultSources :: IO [SourceFile]
+detectDefaultSources =
+  filterM (Dir.doesFileExist . pathOfSource) defaultSourceFileCandidates
+
+configuredSources :: [SourceFile] -> IO [SourceFile]
+configuredSources [] = detectDefaultSources
+configuredSources explicitSources = return explicitSources
 
 -- TODO: pretty
 setSources :: Sources -> IO ()
@@ -537,7 +568,7 @@ cmdDrop packageName = \case
 parseCmdInfo :: Opts.ParserInfo (IO ())
 parseCmdInfo =
     Opts.info
-      ((cmdInfo <$> parseInfoAttributes) <**>
+      ((cmdInfo <$> parseCommon) <**>
         Opts.helper) $
       mconcat desc
   where
@@ -547,36 +578,16 @@ parseCmdInfo =
       , Opts.headerDoc $ Just $
           "Examples:" Opts.<$$>
           "" Opts.<$$>
-          "  niv info" Opts.<$$>
           "  niv info"
       ]
-    parseInfoAttributes :: Opts.Parser [T.Text]
-    parseInfoAttributes = many $
-      Opts.argument Opts.str (Opts.metavar "ATTRIBUTE")
 
-cmdInfo :: [T.Text] -> IO ()
-cmdInfo = \case
-    [] -> do
-      putStrLn $ "Infoping package: " <> "TODO"
-      sources <- unSources <$> getSourcesFrom DefaultSource
-
-      setSources $ Sources $
-        HMap.delete (PackageName "TODO") sources
-    attrs -> do
-      putStrLn $ "Infoping attributes :" <>
-        (T.unpack (T.intercalate " " attrs))
-      putStrLn $ "In package: " <> "TODO"
-      sources <- unSources <$> getSources
-
-      packageSpec <- case HMap.lookup (PackageName "TODO") sources of
-        Nothing ->
-          abortCannotDropNoSuchPackage (PackageName "TODO")
-        Just (PackageSpec packageSpec) -> pure $ PackageSpec $
-          HMap.mapMaybeWithKey
-            (\k v -> if k `elem` attrs then Nothing else Just v) packageSpec
-
-      setSources $ Sources $
-        HMap.insert (PackageName "TODO") packageSpec sources
+cmdInfo :: CommonOpts -> IO ()
+cmdInfo opts =
+    do
+      sourceFiles <- configuredSources $ sources opts
+      putStrLn $ "Loading sources: " ++ (show sourceFiles)
+      sources <- unSources <$> loadSources sourceFiles
+      putStrLn $ show sources
 
 
 -------------------------------------------------------------------------------
@@ -772,6 +783,7 @@ data SourceFile
   = DefaultSource
   | LocalSource
   | NamedSource String
+  deriving Show
 
 pathOfSource :: SourceFile -> FilePath
 pathOfSource source = case source of

@@ -10,7 +10,7 @@ executable nix-wrangle
       Paths_nix_wrangle
   hs-source-dirs:
       ./src
-  ghc-options: -Wall -Werror
+  -- ghc-options: -Wall -Werror
   build-depends:
       aeson
     , aeson-pretty
