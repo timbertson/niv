@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -11,7 +12,8 @@ module Main (main) where
 import Control.Applicative
 import Control.Monad
 import Control.Monad.State
-import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey)
+import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey, withObject, Value(..), parseJSON)
+import Data.Aeson.Types (modifyFailure, typeMismatch, Parser)
 import Data.Char (toUpper)
 import Data.Functor ((<&>))
 import Data.Hashable (Hashable)
@@ -33,6 +35,8 @@ import qualified Options.Applicative as Opts
 import qualified Options.Applicative.Help.Pretty as Opts
 import qualified System.Directory as Dir
 
+latestApiVersion = 1
+
 main :: IO ()
 main = join $ Opts.execParser opts
   where
@@ -50,6 +54,65 @@ parseCommand = Opts.subparser (
     Opts.command "update"  parseCmdUpdate <>
     Opts.command "drop"  parseCmdDrop <>
     Opts.command "info"  parseCmdInfo )
+
+data FetchType
+  = Github
+  | Url
+  | Git
+  | GitLocal
+  | Path
+  | Unknown String
+  deriving (Show, Eq)
+instance FromJSON FetchType where
+  parseJSON (String f) = pure $ case T.unpack f of
+    "gihub" -> Github
+    "url" -> Url
+    "git-local" -> GitLocal
+    "path" -> Path
+    other -> Unknown other
+  parseJSON other = typeMismatch "string" other
+
+stringMapOfJson :: Aeson.Object -> Parser (HMap.HashMap String String)
+stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
+  where
+    convertArg :: (T.Text, Aeson.Value) -> Parser (String, String)
+    convertArg (k, v) =
+      (\v -> (T.unpack k, T.unpack v)) <$> parseJSON v
+  
+data SourceSpec = SourceSpec {
+  fetcher :: FetchType,
+  fetchArgs :: HMap.HashMap String String
+} deriving Show
+instance FromJSON SourceSpec where
+  parseJSON v =
+    -- TODO: this is way too verbose
+    case v of
+      (Array v) -> case (toList v) of
+        [fetcher, Object args] ->
+          makeSpec <$> (parseJSON fetcher) <*> (stringMapOfJson args)
+          where
+            makeSpec fetcher fetchArgs = SourceSpec { fetcher, fetchArgs }
+        _ -> invalid (Array v)
+      other -> invalid other
+    where
+      invalid v = modifyFailure ("parsing `source` failed, " ++)
+        (typeMismatch "pair" v)
+
+data PackageSpec' = PackageSpec' {
+  attrs :: SourceSpec,
+  source :: SourceSpec
+} deriving Show
+
+-- instance FromJSON PackageSpec' where
+--   parseJSON = withObject "PackageSpec" $ \v ->
+--     source = v .: "source"
+--
+--       parseJSON source
+--     let attrs = HMap.delete "source" v in
+
+newtype Sources' = Sources'
+  { unSources' :: HMap.HashMap PackageName PackageSpec }
+  deriving newtype (FromJSON, ToJSON)
 
 newtype Sources = Sources
   { unSources :: HMap.HashMap PackageName PackageSpec }
@@ -86,25 +149,31 @@ getSources = do
       Just _ -> abortSourcesIsntAMap
       Nothing -> abortSourcesIsntJSON
 
-loadSourceFile :: SourceFile -> IO Sources
+loadSourceFile :: SourceFile -> IO Sources'
 loadSourceFile source = do
-    -- TODO: if doesn't exist: run niv init
-    putStrLn $ "Reading sources: " ++ sourcePath
-    decodeFileStrict sourcePath >>= \case
-      Just (Aeson.Object obj) ->
-        fmap (Sources . mconcat) $
-          forM (HMap.toList obj) $ \(k, v) ->
-            case v of
-              Aeson.Object v' ->
-                pure $ HMap.singleton (PackageName (T.unpack k)) (PackageSpec v')
-              _ -> abortAttributeIsntAMap
-      Just _ -> abortSourcesIsntAMap
-      Nothing -> abortSourcesIsntJSON
-    where
-      sourcePath = pathOfSource source
+  abortInvalidSourceDocument
+    -- -- TODO: if doesn't exist: run niv init
+    -- putStrLn $ "Reading sources: " ++ sourcePath
+    -- decodeFileStrict sourcePath >>= \case
+    --   Just (Aeson.Object obj) ->
+    --     fmap (Sources . mconcat) $
+    --       forM (HMap.toList obj) $ \(k, v) ->
+    --         case (k, v) of
+    --           ("sources", Aeson.Object v') ->
+    --             pure $ HMap.singleton (PackageName (T.unpack k)) (PackageSpec v')
+    --           ("wrangle", Aeson.Object v') ->
+    --             if HMap.lookup "apiVersion" == latestApiVersion
+    --             then pure ()
+    --             else abortUnsupportedApiVersion
+    --           _ -> abortInvalidSourceDocument
+    --   Just _ -> abortInvalidSourceDocument
+    --   Nothing -> abortSourcesIsntJSON
+    -- where
+    --   sourcePath = pathOfSource source
 
-loadSources :: [SourceFile] -> IO Sources
+loadSources :: [SourceFile] -> IO Sources'
 loadSources sources =
+  -- TODO
   loadSourceFile (head sources)
 
 defaultSourceFileCandidates :: [SourceFile]
@@ -586,7 +655,7 @@ cmdInfo opts =
     do
       sourceFiles <- configuredSources $ sources opts
       putStrLn $ "Loading sources: " ++ (show sourceFiles)
-      sources <- unSources <$> loadSources sourceFiles
+      sources <- unSources' <$> loadSources sourceFiles
       putStrLn $ show sources
 
 
@@ -799,14 +868,19 @@ initNixSourcesJsonContent = "{}"
 -- Abort
 -------------------------------------------------------------------------------
 
-abortSourcesIsntAMap :: IO a
-abortSourcesIsntAMap = abort $ unlines [ line1, line2 ]
+abortInvalidSourceDocument :: IO a
+abortInvalidSourceDocument = abort $ unlines [ line1, line2 ]
   where
     line1 = "Cannot use " <> pathNixSourcesJson
     line2 = [s|
-The sources file should be a JSON map from package name to package
-specification, e.g.:
-  { ... }
+The sources file should be a JSON map with toplevel objects `sources` and `wrangle`.
+|]
+
+abortSourcesIsntAMap :: IO a
+abortSourcesIsntAMap = abort [s|
+The package specifications in the `sources` attribute should be JSON maps from
+attribute name to attribute value, e.g.:
+  { "nixpkgs": { "foo": "bar" } }
 |]
 
 abortAttributeIsntAMap :: IO a
@@ -824,6 +898,10 @@ abortSourcesIsntJSON = abort $ unlines [ line1, line2 ]
   where
     line1 = "Cannot use " <> pathNixSourcesJson
     line2 = "The sources file should be JSON."
+
+abortUnsupportedApiVersion :: IO a
+abortUnsupportedApiVersion = abort $ unlines
+  [ "Unsupported API version" ]
 
 abortCannotAddPackageExists :: PackageName -> IO a
 abortCannotAddPackageExists (PackageName n) = abort $ unlines
