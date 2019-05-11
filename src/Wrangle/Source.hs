@@ -2,13 +2,14 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 
 module Wrangle.Source where
 
 import Control.Monad
 import Control.Applicative ((<|>))
-import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey, withObject, Value(..), parseJSON, (.:), withArray, toJSON)
+import Data.Aeson hiding (eitherDecodeFileStrict)
 import Data.Aeson.Types (modifyFailure, typeMismatch, Parser)
 import Data.Hashable (Hashable)
 import GHC.Exts (toList)
@@ -31,6 +32,7 @@ latestApiVersion = 1
 type StringMap = HMap.HashMap String String
 
 sourceKeyJSON = "source" :: T.Text
+versionKeyJSON = "version" :: T.Text
 sourcesKeyJSON = "sources" :: T.Text
 wrangleKeyJSON = "wrangle" :: T.Text
 apiversionKeyJSON = "apiversion" :: T.Text
@@ -40,6 +42,7 @@ wrangleHeaderJSON =
 
 newtype Template = Template String deriving (Show, Eq, FromJSON, ToJSON)
 newtype Sha256 = Sha256 String deriving (Show, Eq, FromJSON, ToJSON)
+newtype Version = Version String deriving (Show, Eq, FromJSON, ToJSON)
 
 data GithubFetch = GithubFetch {
   ghOwner :: String,
@@ -174,18 +177,21 @@ stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
       (\v -> (T.unpack k, T.unpack v)) <$> parseJSON v
   
 data PackageSpec' = PackageSpec' {
-  attrs :: StringMap,
-  source :: SourceSpec
+  source :: SourceSpec,
+  version :: Maybe Version,
+  attrs :: StringMap
 } deriving Show
 
 instance FromJSON PackageSpec' where
-  parseJSON = withObject "PackageSpec" $ \obj ->
-    build <$>
-      (obj .: sourceKeyJSON >>= parseJSON) <*>
-      (obj `without` sourceKeyJSON >>= stringMapOfJson)
+  parseJSON = withObject "PackageSpec" $ \attrs -> do
+    (source, attrs) <- attrs `extract` sourceKeyJSON
+    (version, attrs) <- attrs `extractMaybe` versionKeyJSON
+    build version <$> parseJSON source <*> stringMapOfJson attrs
     where
-      without obj key = pure $ HMap.delete key obj
-      build source attrs = PackageSpec' { source, attrs }
+      extract obj key = pairWithout key obj <$> obj .: key
+      extractMaybe obj key = pairWithout key obj <$> obj .:? key
+      pairWithout key obj v = (v, HMap.delete key obj)
+      build version source attrs = PackageSpec' { source, version, attrs }
 
 instance ToJSON PackageSpec' where
   toJSON PackageSpec' { attrs, source } =
