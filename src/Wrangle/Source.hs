@@ -1,29 +1,18 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
 
 module Wrangle.Source where
 
-import Control.Applicative
 import Control.Monad
-import Control.Monad.State
+import Control.Exception
 import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey, withObject, Value(..), parseJSON, (.:), withArray, toJSON)
 import Data.Aeson.Types (modifyFailure, typeMismatch, Parser)
-import Data.Char (toUpper)
-import Data.Functor ((<&>))
 import Data.Hashable (Hashable)
-import Data.Maybe (mapMaybe, fromMaybe)
-import Data.String.QQ (s)
 import GHC.Exts (toList)
-import System.Exit (exitFailure)
-import System.FilePath ((</>), takeDirectory)
-import System.IO.Unsafe (unsafePerformIO) -- tmp
-import System.Process (readProcess)
+import System.FilePath ((</>))
 import Wrangle.Util
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encode.Pretty as AesonPretty
@@ -33,15 +22,21 @@ import qualified Data.HashMap.Strict as HMap
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import qualified GitHub as GH
-import qualified GitHub.Data.Name as GH
 import qualified Options.Applicative as Opts
-import qualified Options.Applicative.Help.Pretty as Opts
 import qualified System.Directory as Dir
 
 latestApiVersion = 1
 
 type StringMap = HMap.HashMap String String
+
+sourceKeyJSON = "source" :: T.Text
+sourcesKeyJSON = "sources" :: T.Text
+wrangleKeyJSON = "wrangle" :: T.Text
+apiversionKeyJSON = "apiversion" :: T.Text
+wrangleHeaderJSON :: Aeson.Value
+wrangleHeaderJSON =
+  Object $ HMap.singleton apiversionKeyJSON (toJSON latestApiVersion)
+
 
 data FetchType
   = Github
@@ -51,14 +46,33 @@ data FetchType
   | Path
   | Unknown String
   deriving (Show, Eq)
+
+fetchTypeToStr = [
+    (Github, "github"),
+    (Url, "url"),
+    (Git, "git"),
+    (GitLocal, "git-local"),
+    (Path, "path")
+  ]
+
+fetchTypeOfStr = map (\(a,b) -> (b,a)) fetchTypeToStr
+
+orElse (Just x) _ = x
+orElse Nothing x = x
+  
 instance FromJSON FetchType where
-  parseJSON (String f) = pure $ case T.unpack f of
-    "gihub" -> Github
-    "url" -> Url
-    "git-local" -> GitLocal
-    "path" -> Path
-    other -> Unknown other
+  parseJSON (String text) = pure $
+    lookup str fetchTypeOfStr `orElse` Unknown str
+    where str = T.unpack text
+
   parseJSON other = typeMismatch "string" other
+
+instance ToJSON FetchType where
+  toJSON typ = toJSON $ (lookup typ fetchTypeToStr) `orElse` (
+    case typ of
+      Unknown str -> str
+      _ -> throw $ AssertionFailed "unknown fetch type, this is a big"
+    )
 
 stringMapOfJson :: Aeson.Object -> Parser (HMap.HashMap String String)
 stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
@@ -84,6 +98,9 @@ instance FromJSON SourceSpec where
         invalid v = modifyFailure ("parsing `source` failed, " ++)
           (typeMismatch "pair" v)
 
+instance ToJSON SourceSpec where
+  toJSON SourceSpec { fetcher, fetchArgs } = toJSON (fetcher, fetchArgs)
+
 data PackageSpec' = PackageSpec' {
   attrs :: StringMap,
   source :: SourceSpec
@@ -92,30 +109,42 @@ data PackageSpec' = PackageSpec' {
 instance FromJSON PackageSpec' where
   parseJSON = withObject "PackageSpec" $ \obj ->
     build <$>
-      (obj .: "source" >>= parseJSON) <*>
-      (obj `without` "source" >>= stringMapOfJson)
+      (obj .: sourceKeyJSON >>= parseJSON) <*>
+      (obj `without` sourceKeyJSON >>= stringMapOfJson)
     where
       without obj key = pure $ HMap.delete key obj
       build source attrs = PackageSpec' { source, attrs }
 
+instance ToJSON PackageSpec' where
+  toJSON PackageSpec' { attrs, source } =
+    toJSON $ HMap.insert
+      (T.unpack sourceKeyJSON) (toJSON source) (HMap.map toJSON attrs)
+
 newtype Sources' = Sources'
   { unSources' :: HMap.HashMap PackageName PackageSpec' }
-  deriving newtype Show
+  deriving newtype (Show)
 
 instance FromJSON Sources' where
   parseJSON = withObject "document" $ \obj ->
-    (obj .: "wrangle" >>= checkHeader) >>
-    Sources' <$> (obj .: "sources" >>= withObject "sources" parsePackageSpecs)
+    (obj .: wrangleKeyJSON >>= checkHeader) >>
+    Sources' <$> (obj .: sourcesKeyJSON >>= withObject "sources" parsePackageSpecs)
     where
       parsePackageSpecs attrs = HMap.fromList <$> mapM parseItem (HMap.toList attrs)
       parseItem :: (T.Text, Value) -> Parser (PackageName, PackageSpec')
       parseItem (k,v) = (PackageName $ T.unpack k,) <$> parseJSON v
       checkHeader = withObject "Wrangle Header" $ \obj ->
-        (obj .: "apiversion" >>= checkApiVersion)
+        (obj .: apiversionKeyJSON >>= checkApiVersion)
       checkApiVersion v =
         if v == (Number latestApiVersion)
           then pure ()
           else fail ("unsupported API version: " <> (TL.unpack . TLE.decodeUtf8 $ Aeson.encode v))
+
+instance ToJSON Sources' where
+  toJSON (Sources' s) = toJSON $
+    HMap.fromList [
+      (sourcesKeyJSON, toJSON s),
+      (wrangleKeyJSON, wrangleHeaderJSON)
+    ]
 
 loadSourceFile :: SourceFile -> IO Sources'
 loadSourceFile source = do
@@ -169,9 +198,18 @@ parsePackageName = PackageName <$>
 eitherDecodeFileStrict :: (FromJSON a) => FilePath -> IO (Either String a)
 eitherDecodeFileStrict = fmap Aeson.eitherDecodeStrict . B.readFile
 
+encodePretty :: (ToJSON a) => a -> L.ByteString
+encodePretty = AesonPretty.encodePretty' (AesonPretty.defConfig {
+  AesonPretty.confIndent = AesonPretty.Spaces 2,
+  AesonPretty.confCompare = AesonPretty.compare
+})
+
+encodePrettyString :: (ToJSON a) => a -> String
+encodePrettyString = TL.unpack . TLE.decodeUtf8 . encodePretty
+
 -- | Efficiently serialize a JSON value as a lazy 'L.ByteString' and write it to a file.
 encodeFile :: (ToJSON a) => FilePath -> a -> IO ()
-encodeFile fp = L.writeFile fp . AesonPretty.encodePretty
+encodeFile fp = L.writeFile fp . encodePretty
 
 data SourceFile
   = DefaultSource

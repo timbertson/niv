@@ -1,5 +1,4 @@
 {-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -12,28 +11,21 @@ module Wrangle.Cmd where
 import Control.Applicative
 import Control.Monad
 import Control.Monad.State
-import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey, withObject, Value(..), parseJSON, (.:), withArray, toJSON)
-import Data.Aeson.Types (modifyFailure, typeMismatch, Parser)
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (toUpper)
 import Data.Functor ((<&>))
 import Data.Hashable (Hashable)
 import Data.Maybe (mapMaybe, fromMaybe)
 import Data.String.QQ (s)
 import GHC.Exts (toList)
-import System.Exit (exitFailure)
 import System.FilePath ((</>), takeDirectory)
-import System.IO.Unsafe (unsafePerformIO) -- tmp
 import System.Process (readProcess)
 import Wrangle.Source
 import Wrangle.Util
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as AesonPretty
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy as L
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.Text as T
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.Encoding as TLE
 import qualified GitHub as GH
 import qualified GitHub.Data.Name as GH
 import qualified Options.Applicative as Opts
@@ -50,6 +42,7 @@ main = join $ Opts.execParser opts
       ]
 
 
+latestApiVersion :: Int
 latestApiVersion = 1
 
 parseCommand :: Opts.Parser (IO ())
@@ -558,7 +551,7 @@ cmdInfo opts =
       sourceFiles <- configuredSources $ sources opts
       putStrLn $ "Loading sources: " ++ (show sourceFiles)
       sources <- loadSources sourceFiles
-      putStrLn $ show sources
+      putStrLn $ encodePrettyString sources
 
 
 -------------------------------------------------------------------------------
