@@ -7,7 +7,7 @@
 module Wrangle.Source where
 
 import Control.Monad
-import Control.Exception
+import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey, withObject, Value(..), parseJSON, (.:), withArray, toJSON)
 import Data.Aeson.Types (modifyFailure, typeMismatch, Parser)
 import Data.Hashable (Hashable)
@@ -24,6 +24,7 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Options.Applicative as Opts
 import qualified System.Directory as Dir
+import qualified System.FilePath.Posix as PosixPath
 
 latestApiVersion = 1
 
@@ -37,42 +38,133 @@ wrangleHeaderJSON :: Aeson.Value
 wrangleHeaderJSON =
   Object $ HMap.singleton apiversionKeyJSON (toJSON latestApiVersion)
 
+newtype Template = Template String deriving (Show, Eq, FromJSON, ToJSON)
+newtype Sha256 = Sha256 String deriving (Show, Eq, FromJSON, ToJSON)
 
-data FetchType
-  = Github
-  | Url
-  | Git
-  | GitLocal
-  | Path
-  | Unknown String
+data GithubFetch = GithubFetch {
+  ghOwner :: String,
+  ghRepo :: String,
+  ghRev :: String,
+  ghDigest :: Sha256
+} deriving (Show, Eq)
+
+data UrlFetchType = FetchArchive | FetchFile deriving (Show, Eq)
+instance ToJSON UrlFetchType where
+  toJSON FetchArchive = toJSON (s "url")
+  toJSON FetchFile = toJSON (s "file")
+
+instance FromJSON UrlFetchType where
+  parseJSON (String "file") = pure FetchFile
+  parseJSON (String "url") = pure FetchArchive
+  parseJSON v = typeMismatch "\"file\" or \"url\"" v
+
+data UrlFetch = UrlFetch {
+  urlType :: UrlFetchType,
+  url :: String,
+  urlDigest :: Sha256
+} deriving (Show, Eq)
+
+data GitFetch = GitFetch {
+  gitUrl :: String,
+  gitRev :: String,
+  gitDigest :: Sha256
+} deriving (Show, Eq)
+
+data LocalPath
+  = FullPath FilePath
+  | RelativePath FilePath
+   deriving (Show, Eq)
+
+instance FromJSON LocalPath where
+  parseJSON (String text) = pure $
+    if PosixPath.isAbsolute p then FullPath p else RelativePath p
+    where p = T.unpack text
+  parseJSON other = typeMismatch "string" other
+
+instance ToJSON LocalPath where
+  toJSON (FullPath s) = toJSON s
+  toJSON (RelativePath s) = toJSON s
+
+data GitLocalFetch = GitLocalFetch {
+  glPath :: LocalPath,
+  glRef :: String
+} deriving (Show, Eq)
+
+data SourceSpec
+  = Github GithubFetch
+  | Url UrlFetch
+  | Git GitFetch
+  | GitLocal GitLocalFetch
   deriving (Show, Eq)
-
-fetchTypeToStr = [
-    (Github, "github"),
-    (Url, "url"),
-    (Git, "git"),
-    (GitLocal, "git-local"),
-    (Path, "path")
-  ]
-
-fetchTypeOfStr = map (\(a,b) -> (b,a)) fetchTypeToStr
 
 orElse (Just x) _ = x
 orElse Nothing x = x
-  
-instance FromJSON FetchType where
-  parseJSON (String text) = pure $
-    lookup str fetchTypeOfStr `orElse` Unknown str
-    where str = T.unpack text
 
-  parseJSON other = typeMismatch "string" other
+-- Awkward workaround for now knowing the type of a string literal
+s :: String -> String
+s = id
 
-instance ToJSON FetchType where
-  toJSON typ = toJSON $ (lookup typ fetchTypeToStr) `orElse` (
-    case typ of
-      Unknown str -> str
-      _ -> throw $ AssertionFailed "unknown fetch type, this is a big"
-    )
+instance FromJSON SourceSpec where
+  parseJSON =
+    withArray "SourceSpec" $ \v ->
+      case (toList v) of
+        [fetcher, Object args] ->
+          (buildUrl <$> (parseJSON fetcher :: Parser UrlFetchType) <*> url <*> digest) <|>
+          case fetcher of
+            "github" ->
+              build <$> owner <*> repo <*> rev <*> digest
+              where build ghOwner ghRepo ghRev ghDigest = Github $ GithubFetch {
+                ghOwner, ghRepo, ghRev, ghDigest }
+            "git" -> build <$> url <*> rev <*> digest
+              where build gitUrl gitRev gitDigest = Git $ GitFetch { gitUrl, gitRev, gitDigest }
+            "git-local" ->
+              build <$> path <*> ref
+              where build glPath glRef = GitLocal $ GitLocalFetch { glPath, glRef }
+            _ ->  invalid (Array v)
+          where
+            digest = args .: "sha256"
+            rev = args .: "rev"
+            ref = args .: "ref"
+            owner = args .: "owner"
+            repo = args .: "repo"
+            url = args .: "url"
+            path = args .: "path"
+            buildUrl urlType url urlDigest = Url $ UrlFetch { urlType, url, urlDigest }
+
+        _ -> invalid (Array v)
+      where
+        invalid v = modifyFailure ("parsing `source` failed, " ++)
+          (typeMismatch "pair" v)
+
+instance ToJSON SourceSpec where
+  toJSON spec = case spec of
+    (Github (GithubFetch { ghOwner, ghRepo, ghRev, ghDigest })) -> toJSON $ (s "github", HMap.fromList [
+        owner ghOwner,
+        repo ghRepo,
+        rev ghRev,
+        sha256 ghDigest
+      ])
+    (Url (UrlFetch { urlType, url, urlDigest })) -> toJSON $ (urlType, HMap.fromList [
+        urlAttr url,
+        sha256 urlDigest
+      ])
+    (Git (GitFetch { gitUrl, gitRev, gitDigest })) -> toJSON $ (s "git", HMap.fromList [
+        urlAttr gitUrl,
+        rev gitRev,
+        sha256 gitDigest
+      ])
+    (GitLocal (GitLocalFetch { glPath, glRef })) -> toJSON $ (s "git", HMap.fromList [
+        path glPath,
+        ref glRef
+      ])
+    where
+      owner = (s "owner",) . toJSON
+      repo = (s "repo",) . toJSON
+      rev = (s "rev",) . toJSON
+      ref = (s "ref",) . toJSON
+      path = (s "path",) . toJSON
+      urlAttr = (s "url",) . toJSON
+      sha256 = (s "sha256",) . toJSON
 
 stringMapOfJson :: Aeson.Object -> Parser (HMap.HashMap String String)
 stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
@@ -81,26 +173,6 @@ stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
     convertArg (k, v) =
       (\v -> (T.unpack k, T.unpack v)) <$> parseJSON v
   
-data SourceSpec = SourceSpec {
-  fetcher :: FetchType,
-  fetchArgs :: StringMap
-} deriving Show
-instance FromJSON SourceSpec where
-  parseJSON =
-    withArray "SourceSpec" $ \v ->
-      case (toList v) of
-        [fetcher, Object args] ->
-          makeSpec <$> (parseJSON fetcher) <*> (stringMapOfJson args)
-          where
-            makeSpec fetcher fetchArgs = SourceSpec { fetcher, fetchArgs }
-        _ -> invalid (Array v)
-      where
-        invalid v = modifyFailure ("parsing `source` failed, " ++)
-          (typeMismatch "pair" v)
-
-instance ToJSON SourceSpec where
-  toJSON SourceSpec { fetcher, fetchArgs } = toJSON (fetcher, fetchArgs)
-
 data PackageSpec' = PackageSpec' {
   attrs :: StringMap,
   source :: SourceSpec
@@ -180,21 +252,6 @@ parsePackageName :: Opts.Parser PackageName
 parsePackageName = PackageName <$>
     Opts.argument Opts.str (Opts.metavar "PACKAGE")
 
--------------------------------------------------------------------------------
--- Aux
--------------------------------------------------------------------------------
-
---- Aeson
-
--- | Efficiently deserialize a JSON value from a file.
--- If this fails due to incomplete or invalid input, 'Nothing' is
--- returned.
---
--- The input file's content must consist solely of a JSON document,
--- with no trailing data except for whitespace.
---
--- This function parses immediately, but defers conversion.  See
--- 'json' for details.
 eitherDecodeFileStrict :: (FromJSON a) => FilePath -> IO (Either String a)
 eitherDecodeFileStrict = fmap Aeson.eitherDecodeStrict . B.readFile
 
@@ -207,9 +264,11 @@ encodePretty = AesonPretty.encodePretty' (AesonPretty.defConfig {
 encodePrettyString :: (ToJSON a) => a -> String
 encodePrettyString = TL.unpack . TLE.decodeUtf8 . encodePretty
 
--- | Efficiently serialize a JSON value as a lazy 'L.ByteString' and write it to a file.
 encodeFile :: (ToJSON a) => FilePath -> a -> IO ()
-encodeFile fp = L.writeFile fp . encodePretty
+encodeFile path json =
+  L.writeFile tmpPath (encodePretty json) >>
+  Dir.renameFile tmpPath path
+  where tmpPath = path <> ".tmp" :: FilePath
 
 data SourceFile
   = DefaultSource
