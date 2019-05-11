@@ -115,14 +115,14 @@ instance FromJSON SourceSpec where
           (buildUrl <$> (parseJSON fetcher :: Parser UrlFetchType) <*> url <*> digest) <|>
           case fetcher of
             "github" ->
-              build <$> owner <*> repo <*> rev <*> digest
-              where build ghOwner ghRepo ghRev ghDigest = Github $ GithubFetch {
-                ghOwner, ghRepo, ghRev, ghDigest }
-            "git" -> build <$> url <*> rev <*> digest
-              where build gitUrl gitRev gitDigest = Git $ GitFetch { gitUrl, gitRev, gitDigest }
+              build <$> owner <*> repo <*> rev <*> digest where
+                build ghOwner   ghRepo   ghRev   ghDigest = Github $ GithubFetch {
+                      ghOwner,  ghRepo,  ghRev,  ghDigest }
+            "git" -> build <$> url <*> rev <*> digest where
+              build gitUrl gitRev gitDigest = Git $ GitFetch { gitUrl, gitRev, gitDigest }
             "git-local" ->
-              build <$> path <*> ref
-              where build glPath glRef = GitLocal $ GitLocalFetch { glPath, glRef }
+              build <$> path <*> ref where
+                build glPath glRef = GitLocal $ GitLocalFetch { glPath, glRef }
             _ ->  invalid (Array v)
           where
             digest = args .: "sha256"
@@ -176,13 +176,13 @@ stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
     convertArg (k, v) =
       (\v -> (T.unpack k, T.unpack v)) <$> parseJSON v
   
-data PackageSpec' = PackageSpec' {
+data PackageSpec = PackageSpec {
   source :: SourceSpec,
   version :: Maybe Version,
   attrs :: StringMap
 } deriving Show
 
-instance FromJSON PackageSpec' where
+instance FromJSON PackageSpec where
   parseJSON = withObject "PackageSpec" $ \attrs -> do
     (source, attrs) <- attrs `extract` sourceKeyJSON
     (version, attrs) <- attrs `extractMaybe` versionKeyJSON
@@ -191,24 +191,24 @@ instance FromJSON PackageSpec' where
       extract obj key = pairWithout key obj <$> obj .: key
       extractMaybe obj key = pairWithout key obj <$> obj .:? key
       pairWithout key obj v = (v, HMap.delete key obj)
-      build version source attrs = PackageSpec' { source, version, attrs }
+      build version source attrs = PackageSpec { source, version, attrs }
 
-instance ToJSON PackageSpec' where
-  toJSON PackageSpec' { attrs, source } =
+instance ToJSON PackageSpec where
+  toJSON PackageSpec { attrs, source } =
     toJSON $ HMap.insert
       (T.unpack sourceKeyJSON) (toJSON source) (HMap.map toJSON attrs)
 
-newtype Sources' = Sources'
-  { unSources' :: HMap.HashMap PackageName PackageSpec' }
+newtype Sources = Sources
+  { unSources :: HMap.HashMap PackageName PackageSpec }
   deriving newtype (Show)
 
-instance FromJSON Sources' where
+instance FromJSON Sources where
   parseJSON = withObject "document" $ \obj ->
     (obj .: wrangleKeyJSON >>= checkHeader) >>
-    Sources' <$> (obj .: sourcesKeyJSON >>= withObject "sources" parsePackageSpecs)
+    Sources <$> (obj .: sourcesKeyJSON >>= withObject "sources" parsePackageSpecs)
     where
       parsePackageSpecs attrs = HMap.fromList <$> mapM parseItem (HMap.toList attrs)
-      parseItem :: (T.Text, Value) -> Parser (PackageName, PackageSpec')
+      parseItem :: (T.Text, Value) -> Parser (PackageName, PackageSpec)
       parseItem (k,v) = (PackageName $ T.unpack k,) <$> parseJSON v
       checkHeader = withObject "Wrangle Header" $ \obj ->
         (obj .: apiversionKeyJSON >>= checkApiVersion)
@@ -217,14 +217,14 @@ instance FromJSON Sources' where
           then pure ()
           else fail ("unsupported API version: " <> (TL.unpack . TLE.decodeUtf8 $ Aeson.encode v))
 
-instance ToJSON Sources' where
-  toJSON (Sources' s) = toJSON $
+instance ToJSON Sources where
+  toJSON (Sources s) = toJSON $
     HMap.fromList [
       (sourcesKeyJSON, toJSON s),
       (wrangleKeyJSON, wrangleHeaderJSON)
     ]
 
-loadSourceFile :: SourceFile -> IO Sources'
+loadSourceFile :: SourceFile -> IO Sources
 loadSourceFile source = do
   -- -- TODO: if doesn't exist: run niv init
   putStrLn $ "Reading sources: " ++ sourcePath
@@ -235,7 +235,7 @@ loadSourceFile source = do
   where
     sourcePath = pathOfSource source
 
-loadSources :: [SourceFile] -> IO Sources'
+loadSources :: [SourceFile] -> IO Sources
 loadSources sources =
   -- TODO
   loadSourceFile (head sources)
