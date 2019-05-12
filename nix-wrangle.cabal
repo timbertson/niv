@@ -22,6 +22,7 @@ executable nix-wrangle
     , filepath
     , github
     , hashable
+    , hnix
     , mtl
     , optparse-applicative
     , process
