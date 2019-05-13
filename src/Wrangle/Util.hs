@@ -4,6 +4,6 @@ import System.Exit (exitFailure)
 
 abort :: String -> IO a
 abort msg = do
-    putStrLn msg
-    exitFailure
+  putStrLn msg
+  exitFailure
 

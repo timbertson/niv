@@ -10,6 +10,7 @@ executable nix-wrangle
       Wrangle.Cmd
       Wrangle.Source
       Wrangle.Util
+      Wrangle.Splice
   hs-source-dirs:
       ./src
   ghc-options: -Wall -Werror -fno-warn-name-shadowing -fno-warn-missing-signatures
@@ -18,9 +19,10 @@ executable nix-wrangle
     , aeson-pretty
     , base
     , bytestring
+    , data-fix
     , directory
     , filepath
-    , github
+    -- , github
     , hashable
     , hnix
     , mtl

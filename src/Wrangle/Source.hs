@@ -236,8 +236,9 @@ loadSourceFile source = do
     sourcePath = pathOfSource source
 
 loadSources :: [SourceFile] -> IO Sources
-loadSources sources =
+loadSources sources = do
   -- TODO
+  putStrLn $ "Loading sources: " ++ (show sources)
   loadSourceFile (head sources)
 
 defaultSourceFileCandidates :: [SourceFile]

@@ -10,7 +10,8 @@ module Wrangle.Cmd where
 
 import Control.Applicative
 import Control.Monad
-import Wrangle.Source
+import qualified Wrangle.Source as Source
+import qualified Wrangle.Splice as Splice
 import qualified Options.Applicative as Opts
 import qualified Options.Applicative.Help.Pretty as Opts
 
@@ -29,11 +30,11 @@ parseCommand = Opts.subparser (
     -- Opts.command "add"  parseCmdAdd <>
     -- Opts.command "show"  parseCmdShow <>
     -- Opts.command "update"  parseCmdUpdate <>
-    -- Opts.command "drop"  parseCmdDrop <>
+    Opts.command "splice"  parseCmdSplice <>
     Opts.command "info"  parseCmdInfo )
 
 newtype CommonOpts = CommonOpts {
-  sources :: [SourceFile]
+  sources :: [Source.SourceFile]
 } deriving newtype Show
 
 parseCommon :: Opts.Parser CommonOpts
@@ -41,7 +42,7 @@ parseCommon =
   setSources <$> parseSourceOptions
   where
     setSources s = CommonOpts { sources = s }
-    parseSourceOptions = many $ NamedSource <$> Opts.strOption
+    parseSourceOptions = many $ Source.NamedSource <$> Opts.strOption
       ( Opts.long "source" <>
         Opts.short 's' <>
         Opts.metavar "SOURCE.json" <>
@@ -70,11 +71,37 @@ parseCmdInfo =
 cmdInfo :: CommonOpts -> IO ()
 cmdInfo opts =
   do
-    sourceFiles <- configuredSources $ sources opts
-    putStrLn $ "Loading sources: " ++ (show sourceFiles)
-    sources <- loadSources sourceFiles
-    putStrLn $ encodePrettyString sources
+    sourceFiles <- Source.configuredSources $ sources opts
+    sources <- Source.loadSources sourceFiles
+    putStrLn $ Source.encodePrettyString sources
 
+parseCmdSplice :: Opts.ParserInfo (IO ())
+parseCmdSplice =
+  Opts.info
+    ((cmdSplice <$> parseCommon <*> parseNixPath) <**>
+      Opts.helper) $
+    mconcat desc
+  where
+    parseNixPath = Opts.argument Opts.str (Opts.metavar "NIX_FILE")
+    desc =
+      [ Opts.fullDesc
+      , Opts.progDesc "Splice dependency"
+      , Opts.headerDoc $ Just $
+          "Examples:" Opts.<$$>
+          "" Opts.<$$>
+          "  niv Splice"
+      ]
+
+cmdSplice :: CommonOpts -> FilePath -> IO ()
+cmdSplice _opts path =
+  do
+    expr <- Splice.load path
+    expr <- Splice.getExn expr
+    putStrLn $ show $ expr
+    let simplified = Splice.stripAnnotation expr
+    let replaced = Splice.replaceSource simplified
+    let pretty = Splice.pretty replaced
+    putStrLn $ show $ pretty
 
 -- commands TODO:
 -- wrangle add name url [--type github|url|path|git-local|etc]
