@@ -10,6 +10,8 @@ module Wrangle.Cmd where
 
 import Control.Applicative
 import Control.Monad
+-- import Control.Exception (throw, AssertionFailed(..))
+-- import qualified Data.HashMap.Strict as HMap
 import qualified Wrangle.Source as Source
 import qualified Wrangle.Splice as Splice
 import qualified Options.Applicative as Opts
@@ -93,14 +95,19 @@ parseCmdSplice =
       ]
 
 cmdSplice :: CommonOpts -> FilePath -> IO ()
-cmdSplice _opts path =
+cmdSplice opts path =
   do
     expr <- Splice.load path
     expr <- Splice.getExn expr
     putStrLn $ show $ expr
     let simplified = Splice.stripAnnotation expr
-    let replaced = Splice.replaceSource simplified
-    let pretty = Splice.pretty replaced
+
+    sourceFiles <- Source.configuredSources $ sources opts
+    sources <- Source.loadSources sourceFiles
+    let self = Source.lookup (Source.PackageName "self") sources
+    -- self <- justice self
+    let replaced = Splice.replaceSource simplified <$> (Source.source <$> self)
+    let pretty = Splice.pretty <$> replaced
     putStrLn $ show $ pretty
 
 -- commands TODO:

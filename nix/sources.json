@@ -9,6 +9,19 @@
         ]
     },
     "sources": {
+        "self": {
+            "version": "1.2.3",
+            "source": [
+                "github",
+                {
+                    "owner": "timbertson",
+                    "repo": "opam2nix-packages",
+                    "sha256": "12ywdn3552gkvmv5iwmzd5sfhzqkci30g88ag8dhqshiw8x0ijpd",
+                    "rev": "f0ec05db5fc4eccf8d591d13d7a519755ea5a3a2"
+                }
+            ],
+            "ref": "master"
+        }
         "opam2nix-packages": {
             "nix": "nix/gup-python.nix",
             "version": "1.2.3",

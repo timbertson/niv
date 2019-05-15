@@ -21,6 +21,7 @@ executable nix-wrangle
     , bytestring
     , data-fix
     , directory
+    , errors
     , filepath
     -- , github
     , hashable
