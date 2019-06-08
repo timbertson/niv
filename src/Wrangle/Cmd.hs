@@ -1,6 +1,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TupleSections #-}
@@ -12,6 +13,7 @@ import Control.Applicative
 import Control.Monad
 -- import Control.Exception (throw, AssertionFailed(..))
 -- import qualified Data.HashMap.Strict as HMap
+import qualified Nix.Expr as N
 import qualified Wrangle.Source as Source
 import qualified Wrangle.Splice as Splice
 import qualified Options.Applicative as Opts
@@ -100,13 +102,14 @@ cmdSplice opts path =
     expr <- Splice.load path
     expr <- Splice.getExn expr
     putStrLn $ show $ expr
-    let simplified = Splice.stripAnnotation expr
+    -- TODO: perform on NExprLoc, not NExpr
+    let simplified :: N.NExpr = Splice.stripAnnotation expr
+    -- let simplified = expr
 
     sourceFiles <- Source.configuredSources $ sources opts
     sources <- Source.loadSources sourceFiles
     let self = Source.lookup (Source.PackageName "self") sources
-    -- self <- justice self
-    let replaced = Splice.replaceSource simplified <$> (Source.source <$> self)
+    let replaced = (Splice.replaceSource simplified) <$> (Source.source <$> self)
     let pretty = Splice.pretty <$> replaced
     putStrLn $ show $ pretty
 

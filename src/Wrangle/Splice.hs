@@ -35,6 +35,7 @@ getExn (Failure f) = abort $ show f
 repr :: NExprLoc -> String
 repr expr = show $ stripAnnotation expr
 
+stripAnnotation :: NExprLoc -> NExpr
 stripAnnotation = Expr.stripAnnotation
 pretty = Pretty.prettyNix
 
