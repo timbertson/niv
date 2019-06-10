@@ -104,7 +104,6 @@ cmdSplice opts path =
     putStrLn $ show $ expr
     -- TODO: perform on NExprLoc, not NExpr
     let simplified :: N.NExpr = Splice.stripAnnotation expr
-    -- let simplified = expr
 
     sourceFiles <- Source.configuredSources $ sources opts
     sources <- Source.loadSources sourceFiles

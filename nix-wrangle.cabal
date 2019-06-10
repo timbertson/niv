@@ -29,6 +29,7 @@ executable nix-wrangle
     , mtl
     , optparse-applicative
     , process
+    , prettyprinter
     , string-qq
     , text
     , unordered-containers
