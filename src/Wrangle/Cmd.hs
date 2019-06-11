@@ -11,9 +11,11 @@ module Wrangle.Cmd where
 
 import Control.Applicative
 import Control.Monad
+-- import Control.Monad.Except (liftEither)
 -- import Control.Exception (throw, AssertionFailed(..))
 -- import qualified Data.HashMap.Strict as HMap
-import qualified Nix.Expr as N
+import qualified Data.Text as T
+-- import qualified Nix.Expr as N
 import qualified Wrangle.Source as Source
 import qualified Wrangle.Splice as Splice
 import qualified Options.Applicative as Opts
@@ -99,18 +101,27 @@ parseCmdSplice =
 cmdSplice :: CommonOpts -> FilePath -> IO ()
 cmdSplice opts path =
   do
-    expr <- Splice.load path
+    fileContents <- Splice.load path
+    let expr = Splice.parse fileContents
     expr <- Splice.getExn expr
     putStrLn $ show $ expr
     -- TODO: perform on NExprLoc, not NExpr
-    let simplified :: N.NExpr = Splice.stripAnnotation expr
+    -- let simplified :: N.NExpr = Splice.stripAnnotation expr
 
     sourceFiles <- Source.configuredSources $ sources opts
     sources <- Source.loadSources sourceFiles
-    let self = Source.lookup (Source.PackageName "self") sources
-    let replaced = (Splice.replaceSource simplified) <$> (Source.source <$> self)
-    let pretty = Splice.pretty <$> replaced
-    putStrLn $ show $ pretty
+    self <- liftEither $ Source.lookup (Source.PackageName "self") sources
+    let existingSrcSpans = Splice.extractSourceLocs expr
+    srcSpan <- case existingSrcSpans of
+      [single] -> return single
+      other -> error $ "No single source found in " ++ (show other)
+    let replacedText = Splice.replaceSourceLoc fileContents (Source.source self) srcSpan
+    putStrLn (T.unpack replacedText)
+
+  -- where
+  --   replaceText :: Text -> Either String Source.SourceSpec -> (Maybe (Fix NExprF), SrcSpan) -> Either String Text
+  --   replacedText fileContents sourceSpec splicePoint = do
+  --     \spec -> Splice.replaceSourceLoc fileContents src splicePoint <$> sourceSpec <$>
 
 -- commands TODO:
 -- wrangle add name url [--type github|url|path|git-local|etc]
@@ -119,3 +130,6 @@ cmdSplice opts path =
 --
 -- some fields may be templated, but maybe only template var is `version`?
 -- [version]
+-- 
+liftEither (Left msg) = error (show msg)
+liftEither (Right x) = return x
