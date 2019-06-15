@@ -30,6 +30,11 @@ data Opts = Opts {
   depName :: String
 }
 
+data Indent = Indent {
+  tabs :: Int,
+  spaces :: Int
+}
+
 load :: FilePath -> IO T.Text
 load = T.readFile
 
@@ -48,7 +53,7 @@ stripAnnotation = Expr.stripAnnotation
 pretty = Pretty.prettyNix
 
 nixOfFetch :: Source.SourceSpec -> (NExpr, NExpr)
-nixOfFetch fetch = (Fix $ NSym $ T.pack fetcher, nixAttrs fetchAttrs)
+nixOfFetch fetch = (Fix . NSym . T.pack $ Source.nixName fetcher, nixAttrs fetchAttrs)
   where
     (fetcher, fetchAttrs) = Source.sourceSpecAttrs fetch
     var :: String -> NAttrPath NExpr
@@ -58,52 +63,37 @@ nixOfFetch fetch = (Fix $ NSym $ T.pack fetcher, nixAttrs fetchAttrs)
     strBinding :: (String, String) -> Binding NExpr
     strBinding (key, val) = NamedVar (var key) (Shorthands.mkStr (T.pack val)) nullPos
 
--- replaceSource :: NExpr -> Source.SourceSpec -> NExpr
--- replaceSource expr newSource =
---   cata (mapAttrs (mapSourceBinding updateSourceValue)) expr where
---     mapAttrs fn (NSet bindings) = Fix $ NSet $ fn bindings
---     mapAttrs fn (NRecSet bindings) = Fix $ NRecSet $ fn bindings
---     mapAttrs _ other = Fix other
---
---     updateSourceValue :: Fix NExprF -> Fix NExprF
---     -- expect sources to be applications of a function applied to an attrset
---     -- (e.g. fetchFromGitHub { ... })
---     updateSourceValue (Fix (NBinary NApp fn _args)) = Fix $ NBinary NApp fn fetcherArgs
---     -- If it doesn't match the expected pattern, just replace it with something plausible
---     updateSourceValue _ = Fix $ NBinary NApp fetcherFn fetcherArgs
---
---     (fetcherFn, fetcherArgs) = nixOfFetch newSource
---
---     mapSourceBinding :: (NExpr -> NExpr) -> [Binding NExpr] -> [Binding NExpr]
---     mapSourceBinding fn bindings = map apply bindings where
---       -- TODO: update `pos`?
---       apply (NamedVar name@((StaticKey "src") :| []) expr pos) = (NamedVar name (fn expr) pos)
---       apply other = other
-
 replaceSourceLoc :: T.Text -> Source.SourceSpec -> (Maybe (Fix NExprF), SrcSpan) -> T.Text
 replaceSourceLoc orig src (originalFetcherFn, span) =
   T.unlines $
     (take (startLine-1) origLines)
       ++ [
         partialStart <>
-        -- "<<<" <> (T.pack $ show $ spanBegin span),
-        srcText
-        -- (T.pack $ show $ spanEnd span) <> ">>>"
-        <>
+        -- "<<<" <> (T.pack $ show $ spanBegin span) <>
+        srcText <>
+        -- (T.pack $ show $ spanEnd span) <> ">>>" <>
         partialEnd
       ] ++ (drop (endLine) origLines)
   where
     origLines = T.lines orig
-    -- TODO megaparse must have some niceness for this...
+    megaparsecTabWidth = unPos Megaparsec.defaultTabWidth
+    nixIndentWidth = 2 -- hardcoded in hnix
+
+    colWidth tabWidth '\t' = tabWidth
+    colWidth _ _ = 1
+    isTab = (== '\t')
+    isSpace = (== ' ')
+
+    -- TODO surely megaparsec must have some niceness for this...
     columnToIndex :: Int -> T.Text -> Int
-    columnToIndex col text = doSomething 0 0 (T.unpack text)
+    columnToIndex col text = columnToIndex' 0 0 (T.unpack text)
       where
-        -- TODO it seems ridiculous that I have to map pos -> index this awkwardly
-        colWidth '\t' = unPos Megaparsec.defaultTabWidth
-        colWidth _ = 1
-        doSomething _pos index [] = index
-        doSomething pos index (char: remainder) =
-          if pos >= col then index else doSomething (pos + colWidth char) (index+1) remainder
+        columnToIndex' _pos index [] = index
+        columnToIndex' pos index (char: remainder) =
+          if pos >= col
+          then index
+          else columnToIndex' (pos + (colWidth megaparsecTabWidth) char) (index+1) remainder
+
     partialStart = T.take (columnToIndex (startCol-1) line) line where line = origLines !! (startLine - 1)
     partialEnd = T.drop (columnToIndex (endCol-1) line) line where line = origLines !! (endLine - 1)
     startLine = (unPos . sourceLine . spanBegin) span
@@ -111,10 +101,46 @@ replaceSourceLoc orig src (originalFetcherFn, span) =
     endLine = (unPos . sourceLine . spanEnd) span
     endCol = (unPos . sourceColumn . spanEnd) span
 
-    -- TODO: add appropriate indentation
-    srcText = Doc.renderStrict $ Doc.layoutCompact $ Pretty.prettyNix $ Fix $
-      NBinary NApp (fromMaybe (defaultFetcherFn) originalFetcherFn) fetcherArgs
     (defaultFetcherFn, fetcherArgs) = nixOfFetch src
+    -- TODO: warn if `originalFetcherFn` name differs meaningfully from `defaultFetcherFn`
+    -- (e.g. pkgs.fetchurl should be fine for fetchurl, but not fetchgit)
+    srcExpr = Fix $ NBinary NApp (fromMaybe (defaultFetcherFn) originalFetcherFn) fetcherArgs
+    layoutOpts = Doc.defaultLayoutOptions { Doc.layoutPageWidth = Doc.AvailablePerLine 1 1.0}
+    prettyPrint = Doc.renderStrict . Doc.removeTrailingWhitespace . Doc.layoutPretty layoutOpts
+    srcDoc = Pretty.prettyNix srcExpr
+    srcTextRaw = fixupFinalLine $ prettyPrint $ Doc.nest (tabIndent + spaceIndent) srcDoc
+      where
+        tabIndent = nixIndentWidth * (tabs leadingIndent)
+        spaceIndent = (spaces leadingIndent)
+    srcText = T.intercalate "\n" (replaceLeadingIndents (T.lines srcTextRaw))
+
+    replaceLeadingIndents lines = map replaceLeadingIndent lines
+    replaceLeadingIndent = if tabs leadingIndent == 0 then id else injectTabs
+
+    leadingIndent = Indent { tabs = T.length tabs, spaces = T.length spaces }
+      where
+        (tabs, afterTabs) = T.span isTab partialStart
+        (spaces, _) = T.span isSpace afterTabs
+
+    injectTabs line = indent <> text
+      where
+        (leadingSpaces, text) = T.span isSpace line
+        indentWidth = T.length leadingSpaces
+        numTabs = indentWidth `quot` nixIndentWidth
+        numSpaces = indentWidth - (nixIndentWidth * numTabs)
+        indent = (T.replicate numTabs "\t") <> (T.replicate numSpaces " ")
+
+    -- hnix pretty-print aligns closing brace with attributes, which looks weird.
+    -- This always operates on pretty-printed nix, so indent is 2 spaces
+    fixupFinalLine srcText = fixupFinalLine' (T.lines srcText)
+      where
+        fixupFinalLine' [] = ""
+        fixupFinalLine' [last] = reduceIndent last
+        fixupFinalLine' (line : tail) = line <> "\n" <> (fixupFinalLine' tail)
+      
+        reduceIndent line = newSpaces <> remainder where
+          newSpaces = T.drop nixIndentWidth leadingSpaces
+          (leadingSpaces, remainder) = T.span isSpace line
 
 extractSourceLocs :: Fix NExprLocF -> [(Maybe (Fix NExprF), SrcSpan)]
 extractSourceLocs expr =

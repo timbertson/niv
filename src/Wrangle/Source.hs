@@ -57,6 +57,11 @@ newtype Version = Version String deriving (Show, Eq, FromJSON, ToJSON)
 instance AsString Sha256 where
   asString (Sha256 s) = s
 
+data FetcherName = FetcherName {
+  nixName :: String,
+  wrangleName :: String
+}
+
 data GithubFetch = GithubFetch {
   ghOwner :: String,
   ghRepo :: String,
@@ -194,14 +199,16 @@ instance FromJSON SourceSpec where
         invalid v = modifyFailure ("parsing `source` failed, " ++)
           (typeMismatch "pair" v)
 
-sourceSpecAttrs :: SourceSpec -> (String, [(String,String)])
-sourceSpecAttrs (Github fetch) = ("github", toStringPairs fetch)
-sourceSpecAttrs (Url fetch) = (asString $ urlType fetch, toStringPairs fetch)
-sourceSpecAttrs (Git fetch) = ("git", toStringPairs fetch)
-sourceSpecAttrs (GitLocal fetch) = ("git-local", toStringPairs fetch)
+sourceSpecAttrs :: SourceSpec -> (FetcherName, [(String,String)])
+sourceSpecAttrs spec = (FetcherName { nixName, wrangleName }, fetch) where
+  (nixName, wrangleName, fetch) = case spec of
+    (Github fetch) ->   ("fetchFromGitHub", "github", toStringPairs fetch)
+    (Git fetch) ->      ("fetchgit", "git", toStringPairs fetch)
+    (GitLocal fetch) -> ("exportGitLocal", "git-local", toStringPairs fetch)
+    (Url fetch) ->      ("fetchurl", asString $ urlType fetch, toStringPairs fetch)
 
 instance ToJSON SourceSpec where
-  toJSON spec = toJSON $ (fetcher, HMap.fromList attrs) where
+  toJSON spec = toJSON $ (wrangleName fetcher, HMap.fromList attrs) where
     (fetcher, attrs) = sourceSpecAttrs spec
 
 stringMapOfJson :: Aeson.Object -> Parser (HMap.HashMap String String)
