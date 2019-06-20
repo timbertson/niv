@@ -35,6 +35,7 @@ type StringMap = HMap.HashMap String String
 
 fetchKeyJSON = "fetch" :: T.Text
 specKeyJSON = "spec" :: T.Text
+typeKeyJSON = "type" :: T.Text
 versionKeyJSON = "version" :: T.Text
 sourcesKeyJSON = "sources" :: T.Text
 wrangleKeyJSON = "wrangle" :: T.Text
@@ -244,9 +245,8 @@ instance ToJSON PackageSpec where
   toJSON PackageSpec { sourceSpec, fetchAttrs, packageAttrs } =
     toJSON
       . HMap.insert (T.unpack specKeyJSON) (toJSON sourceSpec)
-      . HMap.insert
-        (T.unpack fetchKeyJSON)
-        (toJSON ([toJSON . wrangleName . fetcherName $ sourceSpec, toJSON fetchAttrs]))
+      . HMap.insert (T.unpack typeKeyJSON) (toJSON . wrangleName . fetcherName $ sourceSpec)
+      . HMap.insert (T.unpack fetchKeyJSON) (toJSON fetchAttrs)
       $ (HMap.map toJSON packageAttrs)
 
 newtype Sources = Sources
