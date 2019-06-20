@@ -11,7 +11,7 @@ import Control.Monad
 import Control.Error.Safe (justErr)
 import Control.Exception (Exception)
 import Control.Applicative ((<|>))
-import Data.Aeson hiding (eitherDecodeFileStrict)
+import Data.Aeson hiding (eitherDecodeFileStrict, encodeFile)
 import Data.Aeson.Types (modifyFailure, typeMismatch, Parser)
 import Data.Hashable (Hashable)
 import GHC.Exts (toList)
@@ -33,7 +33,8 @@ latestApiVersion = 1
 
 type StringMap = HMap.HashMap String String
 
-sourceKeyJSON = "source" :: T.Text
+fetchKeyJSON = "fetch" :: T.Text
+specKeyJSON = "spec" :: T.Text
 versionKeyJSON = "version" :: T.Text
 sourcesKeyJSON = "sources" :: T.Text
 wrangleKeyJSON = "wrangle" :: T.Text
@@ -51,8 +52,11 @@ class AsString t where
   asString :: t -> String
 
 newtype Template = Template String deriving (Show, Eq, FromJSON, ToJSON)
+
+instance AsString Template where
+  asString (Template s) = s
+
 newtype Sha256 = Sha256 String deriving (Show, Eq, FromJSON, ToJSON)
-newtype Version = Version String deriving (Show, Eq, FromJSON, ToJSON)
 
 instance AsString Sha256 where
   asString (Sha256 s) = s
@@ -60,22 +64,20 @@ instance AsString Sha256 where
 data FetcherName = FetcherName {
   nixName :: String,
   wrangleName :: String
-}
-
-data GithubFetch = GithubFetch {
-  ghOwner :: String,
-  ghRepo :: String,
-  ghRev :: String,
-  ghDigest :: Sha256
 } deriving (Show, Eq)
 
-instance ToStringPairs GithubFetch where
-  toStringPairs GithubFetch { ghOwner, ghRepo, ghRev, ghDigest } =
+data GithubSpec = GithubSpec {
+  ghOwner :: String,
+  ghRepo :: String,
+  ghRef :: Template
+} deriving (Show, Eq)
+
+instance ToStringPairs GithubSpec where
+  toStringPairs GithubSpec { ghOwner, ghRepo, ghRef } =
     [
       ("owner", ghOwner),
       ("repo", ghRepo),
-      ("rev", ghRev),
-      ("sha256", asString ghDigest)
+      ("ref", asString ghRef)
     ]
 
 data UrlFetchType = FetchArchive | FetchFile deriving (Show, Eq)
@@ -92,33 +94,30 @@ instance FromJSON UrlFetchType where
   parseJSON (String "url") = pure FetchArchive
   parseJSON v = typeMismatch "\"file\" or \"url\"" v
 
-data UrlFetch = UrlFetch {
+data UrlSpec = UrlSpec {
   urlType :: UrlFetchType,
   url :: String,
   urlDigest :: Sha256
 } deriving (Show, Eq)
 
-instance ToStringPairs UrlFetch where
-  toStringPairs UrlFetch { urlType = _urlType, url, urlDigest } =
+instance ToStringPairs UrlSpec where
+  toStringPairs UrlSpec { urlType = _urlType, url, urlDigest } =
     [
-      -- TODO: deal with urlType?
       ("url", url),
       ("sha256", asString urlDigest)
     ]
 
-data GitFetch = GitFetch {
+data GitSpec = GitSpec {
   gitUrl :: String,
-  gitRev :: String,
-  gitDigest :: Sha256
+  gitRef :: Template
 } deriving (Show, Eq)
 
-instance ToStringPairs GitFetch where
-  toStringPairs GitFetch { gitUrl, gitRev, gitDigest } =
+instance ToStringPairs GitSpec where
+  toStringPairs GitSpec { gitUrl, gitRef } =
     [
       -- TODO: deal with urlType?
       ("url", gitUrl),
-      ("rev", gitRev),
-      ("sha256", asString gitDigest)
+      ("ref", asString gitRef)
     ]
 
 data LocalPath
@@ -139,23 +138,24 @@ instance AsString LocalPath where
 instance ToJSON LocalPath where
   toJSON p = toJSON (asString p)
 
-data GitLocalFetch = GitLocalFetch {
+data GitLocalSpec = GitLocalSpec {
   glPath :: LocalPath,
-  glRef :: String
+  glRef :: Template
 } deriving (Show, Eq)
 
-instance ToStringPairs GitLocalFetch where
-  toStringPairs GitLocalFetch { glPath, glRef } =
+instance ToStringPairs GitLocalSpec where
+  toStringPairs GitLocalSpec { glPath, glRef } =
     [
       ("path", asString glPath),
-      ("ref", glRef)
+      ("ref", asString glRef)
     ]
 
 data SourceSpec
-  = Github GithubFetch
-  | Url UrlFetch
-  | Git GitFetch
-  | GitLocal GitLocalFetch
+  = Github GithubSpec
+  | Url UrlSpec
+  -- TODO rename these ones
+  | Git GitSpec
+  | GitLocal GitLocalSpec
   deriving (Show, Eq)
 
 instance ToStringPairs SourceSpec where
@@ -163,9 +163,6 @@ instance ToStringPairs SourceSpec where
   toStringPairs (Url f) = toStringPairs f
   toStringPairs (Git f) = toStringPairs f
   toStringPairs (GitLocal f) = toStringPairs f
-
-orElse (Just x) _ = x
-orElse Nothing x = x
 
 instance FromJSON SourceSpec where
   parseJSON =
@@ -175,41 +172,46 @@ instance FromJSON SourceSpec where
           (buildUrl <$> (parseJSON fetcher :: Parser UrlFetchType) <*> url <*> digest) <|>
           case fetcher of
             "github" ->
-              build <$> owner <*> repo <*> rev <*> digest where
-                build ghOwner   ghRepo   ghRev   ghDigest = Github $ GithubFetch {
-                      ghOwner,  ghRepo,  ghRev,  ghDigest }
-            "git" -> build <$> url <*> rev <*> digest where
-              build gitUrl gitRev gitDigest = Git $ GitFetch { gitUrl, gitRev, gitDigest }
+              build <$> owner <*> repo <*> ref where
+                build ghOwner  ghRepo  ghRef = Github $ GithubSpec {
+                      ghOwner, ghRepo, ghRef }
+            "git" -> build <$> url <*> ref where
+              build gitUrl gitRef = Git $ GitSpec { gitUrl, gitRef }
             "git-local" ->
               build <$> path <*> ref where
-                build glPath glRef = GitLocal $ GitLocalFetch { glPath, glRef }
+                build glPath glRef = GitLocal $ GitLocalSpec { glPath, glRef }
             _ ->  invalid (Array v)
           where
             digest = args .: "sha256"
-            rev = args .: "rev"
-            ref = args .: "ref"
             owner = args .: "owner"
             repo = args .: "repo"
             url = args .: "url"
             path = args .: "path"
-            buildUrl urlType url urlDigest = Url $ UrlFetch { urlType, url, urlDigest }
+            ref :: Parser Template = args .: "ref"
+            buildUrl urlType url urlDigest = Url $ UrlSpec { urlType, url, urlDigest }
 
         _ -> invalid (Array v)
       where
         invalid v = modifyFailure ("parsing `source` failed, " ++)
           (typeMismatch "pair" v)
 
-sourceSpecAttrs :: SourceSpec -> (FetcherName, [(String,String)])
-sourceSpecAttrs spec = (FetcherName { nixName, wrangleName }, fetch) where
-  (nixName, wrangleName, fetch) = case spec of
-    (Github fetch) ->   ("fetchFromGitHub", "github", toStringPairs fetch)
-    (Git fetch) ->      ("fetchgit", "git", toStringPairs fetch)
-    (GitLocal fetch) -> ("exportGitLocal", "git-local", toStringPairs fetch)
-    (Url fetch) ->      ("fetchurl", asString $ urlType fetch, toStringPairs fetch)
+fetcherName :: SourceSpec -> FetcherName
+fetcherName spec = FetcherName { nixName, wrangleName } where
+  (nixName, wrangleName) = case spec of
+    (Github _) ->   ("fetchFromGitHub", "github")
+    (Git _) ->      ("fetchgit", "git")
+    (GitLocal _) -> ("exportGitLocal", "git-local")
+    (Url fetch) ->  ("fetchurl", asString $ urlType fetch)
+
+sourceSpecAttrs :: SourceSpec -> [(String,String)]
+sourceSpecAttrs spec = case spec of
+    (Github fetch) ->   toStringPairs fetch
+    (Git fetch) ->      toStringPairs fetch
+    (GitLocal fetch) -> toStringPairs fetch
+    (Url fetch) ->      toStringPairs fetch
 
 instance ToJSON SourceSpec where
-  toJSON spec = toJSON $ (wrangleName fetcher, HMap.fromList attrs) where
-    (fetcher, attrs) = sourceSpecAttrs spec
+  toJSON spec = toJSON $ (wrangleName . fetcherName $ spec, sourceSpecAttrs spec)
 
 stringMapOfJson :: Aeson.Object -> Parser (HMap.HashMap String String)
 stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
@@ -219,30 +221,42 @@ stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
       (\v -> (T.unpack k, T.unpack v)) <$> parseJSON v
   
 data PackageSpec = PackageSpec {
-  source :: SourceSpec,
-  version :: Maybe Version,
-  attrs :: StringMap
+  sourceSpec :: SourceSpec,
+  fetchAttrs :: StringMap,
+  packageAttrs :: StringMap
 } deriving Show
 
 instance FromJSON PackageSpec where
   parseJSON = withObject "PackageSpec" $ \attrs -> do
-    (source, attrs) <- attrs `extract` sourceKeyJSON
-    (version, attrs) <- attrs `extractMaybe` versionKeyJSON
-    build version <$> parseJSON source <*> stringMapOfJson attrs
+    (specJSON, attrs) <- attrs `extract` specKeyJSON
+    (fetchJSON, attrs) <- attrs `extract` fetchKeyJSON
+    (_fetchName :: (), fetchAttrs :: StringMap) <- parseJSON fetchJSON
+    build <$> (parseJSON specJSON) <*> (pure fetchAttrs) <*> stringMapOfJson attrs
     where
       extract obj key = pairWithout key obj <$> obj .: key
-      extractMaybe obj key = pairWithout key obj <$> obj .:? key
+      -- extractMaybe obj key = pairWithout key obj <$> obj .:? key
       pairWithout key obj v = (v, HMap.delete key obj)
-      build version source attrs = PackageSpec { source, version, attrs }
+      build sourceSpec fetchAttrs packageAttrs = PackageSpec {
+        sourceSpec, fetchAttrs, packageAttrs
+      }
 
 instance ToJSON PackageSpec where
-  toJSON PackageSpec { attrs, source } =
-    toJSON $ HMap.insert
-      (T.unpack sourceKeyJSON) (toJSON source) (HMap.map toJSON attrs)
+  toJSON PackageSpec { sourceSpec, fetchAttrs, packageAttrs } =
+    toJSON
+      . HMap.insert (T.unpack specKeyJSON) (toJSON sourceSpec)
+      . HMap.insert
+        (T.unpack fetchKeyJSON)
+        (toJSON ([toJSON . wrangleName . fetcherName $ sourceSpec, toJSON fetchAttrs]))
+      $ (HMap.map toJSON packageAttrs)
 
 newtype Sources = Sources
   { unSources :: HMap.HashMap PackageName PackageSpec }
   deriving newtype (Show)
+
+emptySources = Sources { unSources = HMap.empty }
+
+emptyAttrs :: StringMap
+emptyAttrs = HMap.empty
 
 instance FromJSON Sources where
   parseJSON = withObject "document" $ \obj ->
@@ -283,6 +297,8 @@ loadSources sources = do
   putStrLn $ "Loading sources: " ++ (show sources)
   loadSourceFile (head sources)
 
+writeSourceFile :: SourceFile -> Sources -> IO ()
+writeSourceFile sourceFile = encodeFile (pathOfSource sourceFile)
 
 newtype NotFound = NotFound (String, [String])
 instance Show NotFound where

@@ -12,6 +12,7 @@ import Data.Maybe (fromMaybe)
 import Data.List.NonEmpty (NonEmpty((:|)))
 import System.IO.Unsafe
 import Nix.Expr hiding (stripAnnotation)
+import qualified Data.HashMap.Strict as HMap
 import qualified Wrangle.Source as Source
 import qualified Nix.Expr as Expr
 import qualified Nix.Expr.Shorthands as Shorthands
@@ -52,10 +53,11 @@ stripAnnotation :: NExprLoc -> NExpr
 stripAnnotation = Expr.stripAnnotation
 pretty = Pretty.prettyNix
 
-nixOfFetch :: Source.SourceSpec -> (NExpr, NExpr)
-nixOfFetch fetch = (Fix . NSym . T.pack $ Source.nixName fetcher, nixAttrs fetchAttrs)
+nixOfSrc :: Source.PackageSpec -> (NExpr, NExpr)
+nixOfSrc src = (Fix . NSym . T.pack $ Source.nixName fetcher, nixAttrs fetchAttrs)
   where
-    (fetcher, fetchAttrs) = Source.sourceSpecAttrs fetch
+    fetcher = Source.fetcherName $ Source.sourceSpec src
+    fetchAttrs = HMap.toList $ Source.fetchAttrs src
     var :: String -> NAttrPath NExpr
     var s = (StaticKey (T.pack s)) :| []
     nixAttrs :: [(String, String)] -> NExpr
@@ -63,7 +65,7 @@ nixOfFetch fetch = (Fix . NSym . T.pack $ Source.nixName fetcher, nixAttrs fetch
     strBinding :: (String, String) -> Binding NExpr
     strBinding (key, val) = NamedVar (var key) (Shorthands.mkStr (T.pack val)) nullPos
 
-replaceSourceLoc :: T.Text -> Source.SourceSpec -> (Maybe (Fix NExprF), SrcSpan) -> T.Text
+replaceSourceLoc :: T.Text -> Source.PackageSpec -> (Maybe (Fix NExprF), SrcSpan) -> T.Text
 replaceSourceLoc orig src (originalFetcherFn, span) =
   T.unlines $
     (take (startLine-1) origLines)
@@ -101,7 +103,7 @@ replaceSourceLoc orig src (originalFetcherFn, span) =
     endLine = (unPos . sourceLine . spanEnd) span
     endCol = (unPos . sourceColumn . spanEnd) span
 
-    (defaultFetcherFn, fetcherArgs) = nixOfFetch src
+    (defaultFetcherFn, fetcherArgs) = nixOfSrc src
     -- TODO: warn if `originalFetcherFn` name differs meaningfully from `defaultFetcherFn`
     -- (e.g. pkgs.fetchurl should be fine for fetchurl, but not fetchgit)
     srcExpr = Fix $ NBinary NApp (fromMaybe (defaultFetcherFn) originalFetcherFn) fetcherArgs
