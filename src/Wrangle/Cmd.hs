@@ -97,15 +97,16 @@ parseAdd =
       where
         lookup attr = HMap.lookup attr attrs
         buildGithub :: Either String (PackageName, Source.PackageSpec)
-        buildGithub = build <$> identity <*> (liftMaybe "--ref required" ref)
+        buildGithub = build <$> identity
           where
-            build (name, ghOwner, ghRepo) ghRef =
+            build (name, ghOwner, ghRepo) =
               (name, Source.PackageSpec {
                 Source.sourceSpec = Source.Github Source.GithubSpec { Source.ghOwner, Source.ghRepo, Source.ghRef },
                 -- TODO drop consumed attrs, otherwise they'll be double published
                 Source.packageAttrs = attrs,
                 Source.fetchAttrs = Source.emptyAttrs
               })
+              where ghRef = (fromMaybe (Source.Template "master") ref)
 
             ref = Source.Template <$> lookup "ref"
 
