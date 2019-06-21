@@ -62,6 +62,8 @@ prefetch pkg = do
 -- arbitrary prefetch plan:
 -- invoke `nixpkgs.<fetcher> { args }`, setting sha256 to A{40}. Grep out a few patterns, falling bak to whichever 40-char string is != AAAAAA
 -- https://github.com/seppeljordan/nix-prefetch-github/blob/cd9708fcdf033874451a879ac5fe68d7df930b7e/src/nix_prefetch_github/__init__.py#L124
+-- Also note SRI: https://github.com/NixOS/nix/commit/6024dc1d97212130c19d3ff5ce6b1d102837eee6
+-- and https://github.com/NixOS/nix/commit/5e6fa9092fb5be722f3568c687524416bc746423
 
 resolveGithubRef :: GithubSpec -> String -> IO GitRevision
 resolveGithubRef (GithubSpec { ghRepo, ghOwner }) ref =
