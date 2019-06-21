@@ -56,6 +56,11 @@ newtype Template = Template String deriving (Show, Eq, FromJSON, ToJSON)
 instance AsString Template where
   asString (Template s) = s
 
+newtype GitRevision = GitRevision String deriving (Show, Eq, FromJSON, ToJSON)
+
+instance AsString GitRevision where
+  asString (GitRevision s) = s
+
 newtype Sha256 = Sha256 String deriving (Show, Eq, FromJSON, ToJSON)
 
 instance AsString Sha256 where
@@ -96,16 +101,12 @@ instance FromJSON UrlFetchType where
 
 data UrlSpec = UrlSpec {
   urlType :: UrlFetchType,
-  url :: String,
-  urlDigest :: Sha256
+  url :: Template
 } deriving (Show, Eq)
 
 instance ToStringPairs UrlSpec where
-  toStringPairs UrlSpec { urlType = _urlType, url, urlDigest } =
-    [
-      ("url", url),
-      ("sha256", asString urlDigest)
-    ]
+  toStringPairs UrlSpec { urlType = _urlType, url } =
+    [ ("url", asString url) ]
 
 data GitSpec = GitSpec {
   gitUrl :: String,
@@ -171,7 +172,7 @@ instance ToStringPairs SourceSpec where
 parseSourceSpecObject :: Value -> Object -> Parser SourceSpec
 parseSourceSpecObject fetcher attrs = parseUrl <|> parseExplicit
   where
-    parseUrl = (buildUrl <$> (parseJSON fetcher :: Parser UrlFetchType) <*> url <*> digest)
+    parseUrl = (buildUrl <$> (parseJSON fetcher :: Parser UrlFetchType) <*> url)
     parseExplicit = case fetcher of
       "github" ->
         build <$> owner <*> repo <*> ref where
@@ -183,13 +184,12 @@ parseSourceSpecObject fetcher attrs = parseUrl <|> parseExplicit
         build <$> path <*> ref where
           build glPath glRef = GitLocal $ GitLocalSpec { glPath, glRef }
       _ ->  invalid attrs
-    digest = attrs .: "sha256"
     owner = attrs .: "owner"
     repo = attrs .: "repo"
     url = attrs .: "url"
     path = attrs .: "path"
     ref :: Parser Template = attrs .: "ref"
-    buildUrl urlType url urlDigest = Url $ UrlSpec { urlType, url, urlDigest }
+    buildUrl urlType url = Url $ UrlSpec { urlType, url = Template url }
     invalid v = error $ "Unable to pars SourceSpec from: " <> (encodePrettyString v)
 
 fetcherName :: SourceSpec -> FetcherName
@@ -199,13 +199,6 @@ fetcherName spec = FetcherName { nixName, wrangleName } where
     (Git _) ->      ("fetchgit", "git")
     (GitLocal _) -> ("exportGitLocal", "git-local")
     (Url fetch) ->  ("fetchurl", asString $ urlType fetch)
-
-sourceSpecAttrs :: SourceSpec -> [(String,String)]
-sourceSpecAttrs spec = case spec of
-    (Github fetch) ->   toStringPairs fetch
-    (Git fetch) ->      toStringPairs fetch
-    (GitLocal fetch) -> toStringPairs fetch
-    (Url fetch) ->      toStringPairs fetch
 
 stringMapOfJson :: Aeson.Object -> Parser (HMap.HashMap String String)
 stringMapOfJson args = HMap.fromList <$> (mapM convertArg $ HMap.toList args)
@@ -241,7 +234,7 @@ instance ToJSON PackageSpec where
     toJSON
       . HMap.insert (T.unpack typeKeyJSON) (toJSON . wrangleName . fetcherName $ sourceSpec)
       . HMap.insert (T.unpack fetchKeyJSON) (toJSON fetchAttrs)
-      $ (HMap.map toJSON (packageAttrs <> HMap.fromList (sourceSpecAttrs sourceSpec)))
+      $ (HMap.map toJSON (packageAttrs <> HMap.fromList (toStringPairs sourceSpec)))
 
 newtype Sources = Sources
   { unSources :: HMap.HashMap PackageName PackageSpec }
