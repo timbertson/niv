@@ -33,6 +33,7 @@ executable nix-wrangle
     , process
     , prettyprinter
     , string-qq
+    , regex-tdfa
     , text
     , vector
     , unordered-containers

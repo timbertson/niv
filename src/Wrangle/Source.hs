@@ -242,6 +242,9 @@ newtype Sources = Sources
 
 emptySources = Sources { unSources = HMap.empty }
 
+addSource :: Sources -> PackageName -> PackageSpec -> Sources
+addSource s name spec = Sources $ HMap.insert name spec $ unSources s
+
 emptyAttrs :: StringMap
 emptyAttrs = HMap.empty
 
@@ -331,6 +334,9 @@ encodePretty = AesonPretty.encodePretty' (AesonPretty.defConfig {
 
 encodePrettyString :: (ToJSON a) => a -> String
 encodePrettyString = TL.unpack . TLE.decodeUtf8 . encodePretty
+
+encodeOnelineString :: (ToJSON a) => a -> String
+encodeOnelineString = TL.unpack . TLE.decodeUtf8 . Aeson.encode
 
 encodeFile :: (ToJSON a) => FilePath -> a -> IO ()
 encodeFile path json =

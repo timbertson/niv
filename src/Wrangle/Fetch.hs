@@ -4,73 +4,87 @@ module Wrangle.Fetch where
 
 -- import Control.Monad
 -- import Control.Error.Safe (justErr)
--- import Control.Exception (Exception)
 import Control.Monad.Except (throwError)
 import Control.Applicative ((<|>), liftA2)
--- import Data.Aeson hiding (eitherDecodeFileStrict, encodeFile)
+import Data.Aeson (toJSON)
 -- import Data.Aeson.Types (typeMismatch, Parser)
 -- import Data.Hashable (Hashable)
 -- import System.FilePath ((</>))
 import qualified Data.Vector as Vector
 import Data.Vector (Vector)
+import Data.List (intercalate)
 import Wrangle.Util
 import Wrangle.Source
+import Text.Regex.TDFA
 import qualified GitHub as GH
 import qualified GitHub.Data.Name as GH
 import qualified GitHub.Data.GitData as GHData
 import qualified GitHub.Endpoints.GitData.References as GHRef
+import qualified GHC.IO.Handle as H
 -- import qualified Data.Aeson as Aeson
 -- import qualified Data.Aeson.Encode.Pretty as AesonPretty
 -- import qualified Data.ByteString as B
 -- import qualified Data.ByteString.Lazy as L
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.Text as T
+import qualified System.Process as P
 -- import qualified Data.Text.Lazy as TL
 -- import qualified Data.Text.Lazy.Encoding as TLE
 -- import qualified Options.Applicative as Opts
 -- import qualified System.Directory as Dir
 -- import qualified System.FilePath.Posix as PosixPath
 
-prefetch :: PackageSpec -> IO StringMap
-prefetch pkg = do
-  fetchAttrs <- HMap.fromList <$> resolveAttrs src
-  sha256 <- prefetchSha256 (fetcherName src) fetchAttrs
-  return $ HMap.insert "sha256" (asString sha256) fetchAttrs
-  where
-    src = sourceSpec pkg
-    render = renderTemplate (packageAttrs pkg)
+prefetch :: PackageName -> PackageSpec -> IO StringMap
+prefetch name pkg =
+  debugLn ("fetching " <> (show src)) >> HMap.fromList <$> resolveAttrs src where
+  src = sourceSpec pkg
+  render = renderTemplate (packageAttrs pkg)
 
-    resolveAttrs :: SourceSpec -> IO [(String,String)]
-    resolveAttrs (Github (spec@ GithubSpec { ghOwner, ghRepo, ghRef })) = do
-      ref <- liftEither $ render ghRef
-      commit <- resolveGithubRef spec ref
-      return [
-        ("owner", ghOwner),
-        ("repo", ghRepo),
-        ("rev", (asString commit))]
+  addDigest :: [String] -> [(String,String)] -> IO [(String,String)]
+  addDigest path attrs = prefix <$> (log $ prefetchSha256 (fetcherName src) attrs) where
+    prefix d = ("sha256", asString d) : attrs
+    log = tap (\d -> do
+      infoLn $ "Resolved " <>
+        (intercalate " -> " (asString name : path))
+      infoLn $ " - sha256-" <> (asString d))
 
-    resolveAttrs (Url (UrlSpec { url })) = do
-      url <- liftEither $ render url
-      return [("url", url)]
+  resolveAttrs :: SourceSpec -> IO [(String,String)]
+  resolveAttrs (Github (spec@ GithubSpec { ghOwner, ghRepo, ghRef })) = do
+    ref <- liftEither $ render ghRef
+    commit <- resolveGithubRef spec ref
+    addDigest [ref, asString commit] [
+      ("owner", ghOwner),
+      ("repo", ghRepo),
+      ("rev", (asString commit))]
 
-    resolveAttrs (Git _) = error "TODO"
+  resolveAttrs (Url (UrlSpec { url })) = do
+    renderedUrl <- liftEither $ render url
+    addDigest [renderedUrl] [("url", renderedUrl)]
 
-    resolveAttrs (GitLocal (GitLocalSpec { glPath, glRef })) = do
-      ref <- liftEither $ render glRef
-      return [("ref", ref), ("path", asString glPath)]
+  resolveAttrs (Git (GitSpec { gitUrl, gitRef })) = do
+    ref <- liftEither $ render gitRef
+    commit <- resolveGitRef gitUrl ref
+    addDigest [ref, asString commit] [("url", gitUrl), ("rev", asString commit)]
 
--- arbitrary prefetch plan:
--- invoke `nixpkgs.<fetcher> { args }`, setting sha256 to A{40}. Grep out a few patterns, falling bak to whichever 40-char string is != AAAAAA
--- https://github.com/seppeljordan/nix-prefetch-github/blob/cd9708fcdf033874451a879ac5fe68d7df930b7e/src/nix_prefetch_github/__init__.py#L124
--- Also note SRI: https://github.com/NixOS/nix/commit/6024dc1d97212130c19d3ff5ce6b1d102837eee6
--- and https://github.com/NixOS/nix/commit/5e6fa9092fb5be722f3568c687524416bc746423
+  resolveAttrs (GitLocal (GitLocalSpec { glPath, glRef })) = do
+    -- no prefetching necessary!
+    ref <- liftEither $ render glRef
+    return [("ref", ref), ("path", asString glPath)]
 
 resolveGithubRef :: GithubSpec -> String -> IO GitRevision
-resolveGithubRef (GithubSpec { ghRepo, ghOwner }) ref =
+resolveGithubRef (GithubSpec { ghRepo, ghOwner }) ref = do
+  debugLn $ "Resolving github reference: "<>ghRepo<>"/"<>ghOwner<>"#"<>ref
   resolveGithubRef' ref <$> refs
   where
     refs = GHRef.references (name ghOwner) (name ghRepo) >>= liftEither
     name = GH.N . T.pack
+
+-- Git ref could be resolved though:
+--  - smart API, e.g. https://github.com/schacon/simplegit.git/info/refs?service=git-upload-pack
+--  - ssh, e.g. ssh git@github.com git-upload-pack schacon/simplegit.git
+--  - local path, e.g. `git upload-pack /path/to/DIR`
+resolveGitRef :: String -> String -> IO GitRevision
+resolveGitRef _url _ref = error "TODO"
 
 resolveGithubRef' :: String -> Vector GH.GitReference -> GitRevision
 resolveGithubRef' ref refs = extractCommit (
@@ -82,8 +96,63 @@ resolveGithubRef' ref refs = extractCommit (
     extractCommit Nothing = GitRevision ref -- assume it's a commit
     extractCommit (Just ref) = GitRevision . T.unpack . GHData.gitObjectSha . GHData.gitReferenceObject $ ref
 
-prefetchSha256 :: FetcherName -> StringMap -> IO Sha256
-prefetchSha256 = error "TODO prefetchSha256"
+
+shaLen = 52
+dummySHA256 = concat $ replicate shaLen "0"
+
+-- This supports arbitrary prefetching without worrying about nix-prefetch-*.
+-- It's slightly inefficient since it retults in two downloads of a file,
+-- but it's very reliable regardless of fetch method.
+prefetchSha256 :: FetcherName -> [(String,String)] -> IO Sha256
+prefetchSha256 fetcher attrs = do
+  debugLn $ "prefetching "<>(wrangleName fetcher) <> " digest"
+  debugLn $ "+ " <> (show $ exe : args)
+  P.withCreateProcess processSpec parseErr
+  where
+    fetchExpr = intercalate " " [
+      "{fetchJSON}:",
+      "(import <nixpkgs> {})." <> (nixName fetcher),
+      "(builtins.fromJSON fetchJSON)"]
+    fetchJSON = encodeOnelineString . toJSON . HMap.fromList $ ("sha256", dummySHA256) : attrs
+    exe = "nix-build"
+    args = [
+      "--no-out-link",
+      "--argstr", "fetchJSON", fetchJSON,
+      "--expr", fetchExpr]
+
+    parseErr _ _ maybeErr proc = do
+      errText <- liftMaybe "stderr handle is null" maybeErr >>= H.hGetContents
+      sequence_ $ map debugLn $ lines errText
+      _ <- P.waitForProcess proc
+      liftEither $ extractExpectedDigest errText
+
+    processSpec = (P.proc exe args) {
+      P.std_out = P.NoStream,
+      P.std_in = P.NoStream,
+      P.std_err = P.CreatePipe }
+
+-- Thanks https://github.com/seppeljordan/nix-prefetch-github/blob/cd9708fcdf033874451a879ac5fe68d7df930b7e/src/nix_prefetch_github/__init__.py#L124
+-- For the future, note SRI: https://github.com/NixOS/nix/commit/6024dc1d97212130c19d3ff5ce6b1d102837eee6
+-- and https://github.com/NixOS/nix/commit/5e6fa9092fb5be722f3568c687524416bc746423
+extractExpectedDigest :: String -> Either String Sha256
+extractExpectedDigest output = Sha256 <$> (
+  (singleResult $ subMatches nix_1_x) <|>
+  (singleResult $ subMatches nix_2_0) <|>
+  (singleResult $ subMatches nix_2_2) <|>
+  (singleResult $ filter (/= dummySHA256) $ subMatches fallback))
+  where
+  subMatches :: String -> [String]
+  subMatches pat = concat $ drop 1 <$> ((output =~ pat) :: [[String]])
+
+  shaRe = "([a-z0-9]{"<> (show shaLen) <>"})"
+
+  nix_1_x = "output path .* has .* hash '"<>shaRe<>"' when .*"
+  nix_2_0 = "fixed-output derivation produced path .* with sha256 hash '"<>shaRe<>"' instead of the expected hash .*"
+  nix_2_2 = "  got: +sha256:"<>shaRe
+  fallback = shaRe
+
+  singleResult [result] = Right result
+  singleResult _ = Left $ "Unable to detect resulting digest from nix-build output:\n\n" <> output
 
 renderTemplate :: StringMap -> Template -> Either String String
 renderTemplate attrs fullText = render (asString fullText) where

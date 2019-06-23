@@ -21,6 +21,7 @@ import qualified Data.HashMap.Strict as HMap
 import qualified Data.Text as T
 -- import qualified Nix.Expr as N
 import Wrangle.Util
+import qualified Wrangle.Fetch as Fetch
 import qualified Wrangle.Source as Source
 import Wrangle.Source (PackageName(..))
 import qualified Wrangle.Splice as Splice
@@ -216,15 +217,19 @@ parseCmdAdd =
 cmdAdd :: Either String (PackageName, Source.PackageSpec) -> CommonOpts -> IO ()
 cmdAdd addOpt opts =
   do
-    (name, spec) <- liftEither addOpt
-    putStrLn $ "Adding " <> show name <> " // " <> show spec
+    (name, inputSpec) <- liftEither addOpt
+    putStrLn $ "Adding " <> show name <> " // " <> show inputSpec
     extantSourceFile <- listToMaybe <$> (Source.configuredSources $ sources opts)
     let loadedSourceFile :: Maybe (IO (Source.SourceFile, Maybe Source.Sources)) = loadSource <$> extantSourceFile
     source :: (Source.SourceFile, Maybe Source.Sources) <- fromMaybe (return (Source.DefaultSource, Nothing)) loadedSourceFile
     let (sourceFile, inputSource) = source
     let baseSource = fromMaybe (Source.emptySources) inputSource
-    Source.writeSourceFile sourceFile baseSource
-    putStrLn $ "Updated" <> (Source.pathOfSource sourceFile)
+    fetchAttrs <- Fetch.prefetch name inputSpec
+    debugLn $ "Prefetch results: " <> show fetchAttrs
+    let spec = inputSpec { Source.fetchAttrs = fetchAttrs }
+    let modifiedSource = Source.addSource baseSource name spec
+    Source.writeSourceFile sourceFile modifiedSource
+    putStrLn $ "Updated " <> (Source.pathOfSource sourceFile)
   where
     loadSource :: Source.SourceFile -> IO (Source.SourceFile, Maybe Source.Sources)
     loadSource f = (,) f . Just  <$> Source.loadSourceFile f
