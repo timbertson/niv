@@ -7,6 +7,7 @@
 
 module Wrangle.Splice where
 
+import Prelude hiding (error)
 import Wrangle.Util
 import Data.Maybe (fromMaybe)
 import Data.List.NonEmpty (NonEmpty((:|)))

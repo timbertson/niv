@@ -1,8 +1,11 @@
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Wrangle.Fetch where
 
+import Prelude hiding (error)
 -- import Control.Monad
+import Control.Exception (toException)
 -- import Control.Error.Safe (justErr)
 import Control.Monad.Except (throwError)
 import Control.Applicative ((<|>), liftA2)
@@ -84,7 +87,7 @@ resolveGithubRef (GithubSpec { ghRepo, ghOwner }) ref = do
 --  - ssh, e.g. ssh git@github.com git-upload-pack schacon/simplegit.git
 --  - local path, e.g. `git upload-pack /path/to/DIR`
 resolveGitRef :: String -> String -> IO GitRevision
-resolveGitRef _url _ref = error "TODO"
+resolveGitRef _url _ref = fail "TODO"
 
 resolveGithubRef' :: String -> Vector GH.GitReference -> GitRevision
 resolveGithubRef' ref refs = extractCommit (
@@ -121,7 +124,8 @@ prefetchSha256 fetcher attrs = do
       "--expr", fetchExpr]
 
     parseErr _ _ maybeErr proc = do
-      errText <- liftMaybe "stderr handle is null" maybeErr >>= H.hGetContents
+      errHandle <- liftMaybe (toException $ AppError "stderr handle is null") maybeErr
+      errText <- H.hGetContents errHandle
       sequence_ $ map debugLn $ lines errText
       _ <- P.waitForProcess proc
       liftEither $ extractExpectedDigest errText
@@ -134,11 +138,11 @@ prefetchSha256 fetcher attrs = do
 -- Thanks https://github.com/seppeljordan/nix-prefetch-github/blob/cd9708fcdf033874451a879ac5fe68d7df930b7e/src/nix_prefetch_github/__init__.py#L124
 -- For the future, note SRI: https://github.com/NixOS/nix/commit/6024dc1d97212130c19d3ff5ce6b1d102837eee6
 -- and https://github.com/NixOS/nix/commit/5e6fa9092fb5be722f3568c687524416bc746423
-extractExpectedDigest :: String -> Either String Sha256
+extractExpectedDigest :: String -> Either AppError Sha256
 extractExpectedDigest output = Sha256 <$> (
-  (singleResult $ subMatches nix_1_x) <|>
-  (singleResult $ subMatches nix_2_0) <|>
-  (singleResult $ subMatches nix_2_2) <|>
+  (singleResult $ subMatches nix_1_x) `orTry`
+  (singleResult $ subMatches nix_2_0) `orTry`
+  (singleResult $ subMatches nix_2_2) `orTry`
   (singleResult $ filter (/= dummySHA256) $ subMatches fallback))
   where
   subMatches :: String -> [String]
@@ -152,18 +156,18 @@ extractExpectedDigest output = Sha256 <$> (
   fallback = shaRe
 
   singleResult [result] = Right result
-  singleResult _ = Left $ "Unable to detect resulting digest from nix-build output:\n\n" <> output
+  singleResult _ = Left . AppError $ "Unable to detect resulting digest from nix-build output:\n\n" <> output
 
-renderTemplate :: StringMap -> Template -> Either String String
+renderTemplate :: StringMap -> Template -> Either AppError String
 renderTemplate attrs fullText = render (asString fullText) where
-  render :: String -> Either String String
+  render :: String -> Either AppError String
   render ('<':str) = do
       case span (/= '>') str of
         (key, '>':rest) ->
           liftA2 (<>) value (render rest)
           where
-            value = liftMaybe notFound $ HMap.lookup key attrs
-            notFound = "Missing key `"<> key <>"` in template: " <> (asString fullText)
-        _ -> throwError $ "Value contains an unterminated key: " <> (asString fullText)
+            value = toRight notFound $ HMap.lookup key attrs
+            notFound = AppError $ "Missing key `"<> key <>"` in template: " <> (asString fullText)
+        _ -> throwError . AppError $ "Value contains an unterminated key: " <> (asString fullText)
   render (c:str) = (c:) <$> render str
   render [] = Right []

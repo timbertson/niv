@@ -7,6 +7,7 @@
 
 module Wrangle.Source where
 
+import Prelude hiding (error)
 import Control.Monad
 import Control.Error.Safe (justErr)
 import Control.Exception (Exception)
@@ -154,7 +155,6 @@ instance ToStringPairs GitLocalSpec where
 data SourceSpec
   = Github GithubSpec
   | Url UrlSpec
-  -- TODO rename these ones
   | Git GitSpec
   | GitLocal GitLocalSpec
   deriving (Show, Eq)
@@ -190,7 +190,7 @@ parseSourceSpecObject fetcher attrs = parseUrl <|> parseExplicit
     path = attrs .: "path"
     ref :: Parser Template = attrs .: "ref"
     buildUrl urlType url = Url $ UrlSpec { urlType, url = Template url }
-    invalid v = error $ "Unable to pars SourceSpec from: " <> (encodePrettyString v)
+    invalid v = fail $ "Unable to parse SourceSpec from: " <> (encodePrettyString v)
 
 fetcherName :: SourceSpec -> FetcherName
 fetcherName spec = FetcherName { nixName, wrangleName } where
@@ -281,11 +281,15 @@ loadSourceFile source = do
   where
     sourcePath = pathOfSource source
 
-loadSources :: [SourceFile] -> IO Sources
+loadSources :: [SourceFile] -> IO [Sources]
 loadSources sources = do
-  -- TODO
   putStrLn $ "Loading sources: " ++ (show sources)
-  loadSourceFile (head sources)
+  traverse loadSourceFile sources
+
+mergeSources :: [Sources] -> Sources
+mergeSources sources = do
+  -- TODO check order
+  Sources $ foldr HMap.union HMap.empty (map unSources sources)
 
 writeSourceFile :: SourceFile -> Sources -> IO ()
 writeSourceFile sourceFile = encodeFile (pathOfSource sourceFile)
@@ -293,15 +297,14 @@ writeSourceFile sourceFile = encodeFile (pathOfSource sourceFile)
 newtype NotFound = NotFound (String, [String])
 instance Show NotFound where
   show (NotFound (key, keys)) =
-    "(key " <> key <> " not found in " <> (show keys) <> ")"
+    "key `" <> key <> "` not found in " <> (show keys)
 
 instance Exception NotFound
 
 lookup :: PackageName -> Sources -> Either NotFound PackageSpec
-lookup pkg sources =
-  justErr (NotFound (show pkg, asString <$> HMap.keys sourceMap)) $ HMap.lookup pkg sourceMap
-  where
-    sourceMap = unSources sources
+lookup pkg sources = justErr err $ HMap.lookup pkg packages where
+  err = (NotFound (show pkg, asString <$> HMap.keys packages))
+  packages = unSources sources
 
 defaultSourceFileCandidates :: [SourceFile]
 defaultSourceFileCandidates = [ DefaultSource, LocalSource ]
@@ -333,14 +336,20 @@ encodePretty = AesonPretty.encodePretty' (AesonPretty.defConfig {
 })
 
 encodePrettyString :: (ToJSON a) => a -> String
-encodePrettyString = TL.unpack . TLE.decodeUtf8 . encodePretty
+encodePrettyString = stringOfLazy . encodePretty
 
 encodeOnelineString :: (ToJSON a) => a -> String
-encodeOnelineString = TL.unpack . TLE.decodeUtf8 . Aeson.encode
+encodeOnelineString = stringOfLazy . Aeson.encode
+
+stringOfLazy :: L.ByteString -> String
+stringOfLazy = TL.unpack . TLE.decodeUtf8
 
 encodeFile :: (ToJSON a) => FilePath -> a -> IO ()
-encodeFile path json =
-  L.writeFile tmpPath (encodePretty json) >>
+encodeFile path json = writeFileContents path (encodePretty json)
+
+writeFileContents :: FilePath -> L.ByteString -> IO ()
+writeFileContents path contents = do
+  L.writeFile tmpPath contents
   Dir.renameFile tmpPath path
   where tmpPath = path <> ".tmp" :: FilePath
 

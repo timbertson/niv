@@ -23,6 +23,7 @@ executable nix-wrangle
     , data-fix
     , directory
     , errors
+    , exceptions
     , megaparsec
     , filepath
     , github
