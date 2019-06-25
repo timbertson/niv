@@ -68,5 +68,5 @@ instance Semigroup AppError where (<>) (AppError a) (AppError b) = AppError $ a 
 instance Exception AppError
 instance IsString AppError where fromString = AppError
 
-toAppError :: Show s => s -> AppError
-toAppError = AppError . show
+prefixAppError :: String -> Either AppError a -> Either AppError a
+prefixAppError p = mapLeft ((AppError p) <>)
