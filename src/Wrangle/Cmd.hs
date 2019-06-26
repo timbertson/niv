@@ -19,6 +19,7 @@ import Control.Error.Safe (rightMay)
 -- import qualified Data.HashMap.Strict as HMap
 import Data.Char (toUpper)
 import Data.Maybe (listToMaybe, fromMaybe)
+import Data.List (partition)
 import Wrangle.Source (PackageName(..))
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.Text as T
@@ -48,7 +49,7 @@ parseCommand :: Opts.Parser (IO ())
 parseCommand = Opts.subparser (
     -- Opts.command "init" parseCmdInit <>
     Opts.command "add" parseCmdAdd <>
-    -- Opts.command "update" parseCmdUpdate <>
+    Opts.command "update" parseCmdUpdate <>
     Opts.command "splice" parseCmdSplice <>
     Opts.command "show" parseCmdShow <>
     Opts.command "default-nix" parseCmdDefaultNix
@@ -92,14 +93,17 @@ parseCommon =
         Opts.help "Specify wrangle.json file to operate on"
       )
 
+parseName :: Opts.Parser Source.PackageName
+parseName = Source.PackageName <$> Opts.argument Opts.str (Opts.metavar "NAME")
+
+parseNames :: Opts.Parser [Source.PackageName]
+parseNames = many parseName
+
 parseAdd :: Opts.Parser (Either AppError (PackageName, Source.PackageSpec))
 parseAdd =
-  mapLeft AppError <$> (build <$> parseName <*> parsePackageAttrs)
+  mapLeft AppError <$> (build <$> Opts.optional parseName <*> parsePackageAttrs)
   where
-    parseName :: Opts.Parser (Maybe String)
-    parseName = Opts.optional $ Opts.argument Opts.str (Opts.metavar "NAME")
-
-    build :: (Maybe String) -> (Source.StringMap) -> Either String (PackageName, Source.PackageSpec)
+    build :: (Maybe PackageName) -> (Source.StringMap) -> Either String (PackageName, Source.PackageSpec)
     build name attrs =
       case lookup "type"  of
         Nothing -> buildGithub
@@ -123,9 +127,9 @@ parseAdd =
 
             identity :: Either String (PackageName, String, String)
             identity = case (name, lookup "owner", lookup "repo") of
-              (name, Just owner, Just repo) -> Right (PackageName $ fromMaybe repo name, owner, repo)
+              (name, Just owner, Just repo) -> Right (fromMaybe (PackageName repo) name, owner, repo)
               -- (Just name, Just owner, Nothing) -> Right (PackageName name, owner, name)
-              (Just name, Nothing, Nothing) -> case span (/= '/') name of
+              (Just (PackageName name), Nothing, Nothing) -> case span (/= '/') name of
                 (owner, '/':repo) -> Right (PackageName repo, owner, repo)
                 _ -> throwError ("`" <> name <> "` doesn't look like a github repo")
               (Nothing, _, _) -> throwError "name or --owner/--repo required"
@@ -230,20 +234,75 @@ cmdAdd addOpt opts =
     (name, inputSpec) <- liftEither addOpt
     putStrLn $ "Adding " <> show name <> " // " <> show inputSpec
     extantSourceFile <- listToMaybe <$> (Source.configuredSources $ sources opts)
-    let loadedSourceFile :: Maybe (IO (Source.SourceFile, Maybe Source.Sources)) = loadSource <$> extantSourceFile
+    let loadedSourceFile :: Maybe (IO (Source.SourceFile, Maybe Source.Sources)) = loadSource' <$> extantSourceFile
     source :: (Source.SourceFile, Maybe Source.Sources) <- fromMaybe (return (Source.DefaultSource, Nothing)) loadedSourceFile
     let (sourceFile, inputSource) = source
     let baseSource = fromMaybe (Source.emptySources) inputSource
-    fetchAttrs <- Fetch.prefetch name inputSpec
-    debugLn $ "Prefetch results: " <> show fetchAttrs
-    let spec = inputSpec { Source.fetchAttrs = fetchAttrs }
+    spec <- Fetch.prefetch name inputSpec
     let modifiedSource = Source.addSource baseSource name spec
     Source.writeSourceFile sourceFile modifiedSource
     putStrLn $ "Updated " <> (Source.pathOfSource sourceFile)
   where
-    loadSource :: Source.SourceFile -> IO (Source.SourceFile, Maybe Source.Sources)
-    loadSource f = (,) f . Just  <$> Source.loadSourceFile f
+    loadSource' :: Source.SourceFile -> IO (Source.SourceFile, Maybe Source.Sources)
+    -- TODO: arrows?
+    loadSource' f = (\(a,b) -> (a, Just b)) <$> loadSource f
+
+loadSource :: Source.SourceFile -> IO (Source.SourceFile, Source.Sources)
+loadSource f = (,) f <$> Source.loadSourceFile f
       
+-------------------------------------------------------------------------------
+-- Update
+-------------------------------------------------------------------------------
+parseCmdUpdate :: Opts.ParserInfo (IO ())
+parseCmdUpdate =
+  Opts.info
+    ((cmdUpdate <$> Opts.optional parseNames <*> parsePackageAttrs <*> parseCommon) <**> Opts.helper) $
+    mconcat desc
+  where
+    desc =
+      [ Opts.fullDesc
+      , Opts.progDesc "Update sources"
+      , Opts.headerDoc $ Just $
+          "Examples:" Opts.<$$>
+          "" Opts.<$$>
+          "  nix-wrangle update"
+      ]
+
+cmdUpdate :: Maybe [PackageName] -> Source.StringMap -> CommonOpts -> IO ()
+cmdUpdate packageNamesOpt updateAttrs opts = do
+  sourceFiles <- Source.configuredSources $ sources opts
+  sources <- sequence $ map loadSource sourceFiles
+  checkMissingKeys (map snd sources)
+  sequence_ $ map updateSources sources
+  where
+    checkMissingKeys :: [Source.Sources] -> IO ()
+    checkMissingKeys sources = case missingKeys of
+      [] -> return ()
+      _ -> fail $ "No such packages: " <> show missingKeys
+      where
+        (_, missingKeys) = partitionPackageNames $ Source.mergeSources sources
+
+    partitionPackageNames :: Source.Sources -> ([PackageName], [PackageName])
+    partitionPackageNames sources = case packageNamesOpt of
+      Nothing -> (Source.keys sources, [])
+      (Just names) -> partition (Source.member sources) names
+    
+    updateSingle :: Source.Sources -> PackageName -> IO Source.Sources
+    updateSingle packages name = do
+      infoLn $ " - updating " <> (show name) <> "..."
+      original <- liftEither $ Source.lookup name packages
+      newSpec <- liftEither $ Source.updatePackageSpec original updateAttrs
+      fetched <- if newSpec /= original
+        then Fetch.prefetch name newSpec
+        else (infoLn "   ... unchanged" >> return newSpec)
+      return $ Source.addSource packages name fetched
+
+    updateSources :: (Source.SourceFile, Source.Sources) -> IO ()
+    updateSources (sourceFile, sources) = do
+      infoLn $ "Updating "<> Source.pathOfSource sourceFile <> " ..."
+      let (packageNames, _) = partitionPackageNames sources
+      updated <- foldM updateSingle sources packageNames
+      Source.writeSourceFile sourceFile updated
 
 -------------------------------------------------------------------------------
 -- Splice

@@ -211,7 +211,7 @@ data PackageSpec = PackageSpec {
   sourceSpec :: SourceSpec,
   fetchAttrs :: StringMap,
   packageAttrs :: StringMap
-} deriving Show
+} deriving (Show, Eq)
 
 instance FromJSON PackageSpec where
   parseJSON = withObject "PackageSpec" $ \attrs -> do
@@ -236,6 +236,7 @@ instance ToJSON PackageSpec where
       . HMap.insert (T.unpack fetchKeyJSON) (toJSON fetchAttrs)
       $ (HMap.map toJSON (packageAttrs <> HMap.fromList (toStringPairs sourceSpec)))
 
+-- TODO rename Packages
 newtype Sources = Sources
   { unSources :: HMap.HashMap PackageName PackageSpec }
   deriving newtype (Show)
@@ -269,6 +270,19 @@ instance ToJSON Sources where
       (sourcesKeyJSON, toJSON s),
       (wrangleKeyJSON, wrangleHeaderJSON)
     ]
+
+liftResult :: Result a -> Either AppError a
+liftResult (Error err) = Left $ AppError err
+liftResult (Success x) = Right x
+
+-- Note: doesn't update `fetch` attrs
+updatePackageSpec :: PackageSpec -> StringMap -> Either AppError PackageSpec
+updatePackageSpec original attrs = mergedJSON >>= liftResult <$> fromJSON where
+  -- Going via JSON is a little hacky, but
+  -- we've already got a nice to/from JSON code path
+  mergedJSON = case (toJSON original, toJSON attrs) of
+    (Object orig, Object add) -> Right $ Object $ HMap.union orig add
+    (_, _) -> Left $ "Expected JSON object" -- should be impossible
 
 loadSourceFile :: SourceFile -> IO Sources
 loadSourceFile source = do
@@ -305,6 +319,12 @@ lookup :: PackageName -> Sources -> Either NotFound PackageSpec
 lookup pkg sources = justErr err $ HMap.lookup pkg packages where
   err = (NotFound (show pkg, asString <$> HMap.keys packages))
   packages = unSources sources
+
+keys :: Sources -> [PackageName]
+keys = HMap.keys . unSources
+
+member :: Sources -> PackageName -> Bool
+member = (flip HMap.member) . unSources
 
 defaultSourceFileCandidates :: [SourceFile]
 defaultSourceFileCandidates = [ DefaultSource, LocalSource ]

@@ -37,9 +37,14 @@ import qualified System.Process as P
 -- import qualified System.Directory as Dir
 -- import qualified System.FilePath.Posix as PosixPath
 
-prefetch :: PackageName -> PackageSpec -> IO StringMap
-prefetch name pkg =
-  debugLn ("fetching " <> (show src)) >> HMap.fromList <$> resolveAttrs src where
+prefetch :: PackageName -> PackageSpec -> IO PackageSpec
+prefetch name pkg = do
+  debugLn ("fetching " <> (show src))
+  fetchAttrs <- HMap.fromList <$> resolveAttrs src
+  debugLn $ "Prefetch results: " <> show fetchAttrs
+  return $ pkg { fetchAttrs = fetchAttrs }
+  where
+
   src = sourceSpec pkg
   render = renderTemplate (packageAttrs pkg)
 
